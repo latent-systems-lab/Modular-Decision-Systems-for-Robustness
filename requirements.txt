@@ -1,0 +1,13 @@
+pandas>=2.0
+numpy>=1.24
+scipy>=1.10
+matplotlib>=3.7
+pydantic>=2.6
+openai>=1.40
+google-genai>=0.6
+gym>=0.26
+stable-baselines3>=2.3
+torch>=2.2
+faiss-cpu>=1.8.0
+sentence-transformers>=3.0.0
+# If GPU acceleration is available, replace faiss-cpu with faiss-gpu.
