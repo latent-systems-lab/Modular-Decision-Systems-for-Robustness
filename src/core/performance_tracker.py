@@ -1,5 +1,5 @@
 """
-Performance Tracker for the portfolio risk-management simulation system.
+Performance Tracker for the hedge fund simulation system.
 Responsible for tracking and reporting portfolio performance metrics.
 """
 
@@ -325,6 +325,7 @@ class PerformanceTracker:
     def append_portfolio_snapshot(self, portfolio):
         """
         Append a portfolio snapshot to a JSON Lines file with additional computed fields.
+        Date and total_value appear first for quick scanning.
 
         Args:
             portfolio: The Portfolio object (a pydantic model) from get_portfolio_snapshot.
@@ -351,9 +352,16 @@ class PerformanceTracker:
             snapshot["cash"] + snapshot["stock_value"] + snapshot["option_value"]
         )
 
+        # Reorder keys to put date and total_value at the top for quick scanning
+        ordered_snapshot = {}
+        ordered_snapshot["date"] = snapshot.pop("date")
+        ordered_snapshot["total_value"] = snapshot.pop("total_value")
+        # Add all remaining fields
+        ordered_snapshot.update(snapshot)
+
         # Open the file in append mode and write the updated snapshot as a new line.
         with open(history_file, "a") as f:
-            json_snapshot = json.dumps(snapshot, default=str)
+            json_snapshot = json.dumps(ordered_snapshot, default=str)
             f.write(json_snapshot + "\n")
 
         print(f"Appended portfolio snapshot for {portfolio.date} to {history_file}")

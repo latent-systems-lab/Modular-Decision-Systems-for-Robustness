@@ -137,6 +137,9 @@ def _build_config(target_day: date) -> ExtendedSimulationConfig:
         use_llm=config.USE_LLM,
         hedging_strategies=list(config.HEDGING_STRATEGIES),
         use_memory_rl=getattr(config, "use_memory_rl", False),
+        equal_options_strategy_split=getattr(
+            config, "EQUAL_OPTIONS_STRATEGY_SPLIT", False
+        ),
     )
 
     rule_based_split = getattr(config, "RULE_BASED_STRATEGY_SPLIT", None)

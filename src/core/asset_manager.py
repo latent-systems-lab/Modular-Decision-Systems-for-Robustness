@@ -1,8 +1,9 @@
 """
-Asset Manager for the portfolio risk-management simulation system.
+Asset Manager for the hedge fund simulation system.
 Responsible for managing per-asset logic including stock vs. options split and hedging strategies.
 """
 
+import logging
 from datetime import date
 from typing import Dict, List, Optional
 
@@ -20,6 +21,7 @@ from src.agents.collar_agent import CollarAgent
 from src.agents.straddle_agent import StraddleAgent
 from src.agents.delta_neutral_agent import DeltaNeutralAgent
 
+logger = logging.getLogger(__name__)
 
 class AssetManager:
     """
@@ -66,19 +68,19 @@ class AssetManager:
         if use_llm:
             # Build prompt for LLM
             prompt = f"""
-            You are a portfolio manager deciding how to split ${allocation_amount:,.2f} allocated to {ticker} between stock and options.
-            
+            You are a hedge fund manager deciding how to split ${allocation_amount:,.2f} allocated to {ticker} between stock and options.
+
             Market Analysis for {ticker}:
             - Market Regime: {market_analysis.regime}
             - Sentiment Score: {market_analysis.sentiment:.2f} ({market_analysis.sentiment_label})
             - Outlook Score: {market_analysis.outlook:.2f} ({market_analysis.outlook_label})
             - Short-term Outlook: {market_analysis.short_term_outlook}
             - Confidence: {market_analysis.confidence:.2f}
-            
+
             Based on this analysis, determine:
             1. What percentage should be allocated to stock vs. options?
             2. Provide a brief rationale for this decision.
-            
+
             Consider:
             - In bullish regimes, you might allocate more to stock
             - In bearish regimes, you might allocate more to protective options
@@ -537,8 +539,9 @@ class AssetManager:
             max_dte=60,  # At most 2 months to expiration
         )
 
-        # Convert to list of dictionaries
-        return [option.dict() for option in options_data]
+        result = [option.dict() for option in options_data]
+        logger.debug(f"Options for {ticker} on {current_date}: loaded {len(result)} contracts (min_dte=7, max_dte=60)")
+        return result
 
     def select_all_hedging_strategies(
         self,
@@ -574,6 +577,8 @@ class AssetManager:
         # Retrieve available options for the asset
         available_options = self._get_available_options(ticker, current_date)
         if not available_options:
+
+            logger.warning(f"No options available for {ticker} on {current_date} (min_dte=7, max_dte=60). Cannot apply hedging strategies.")
             return HedgingStrategy(
                 asset=ticker,
                 strategy_type="none",

@@ -1,5 +1,5 @@
 """
-Data Manager for the portfolio risk-management simulation system.
+Data Manager for the hedge fund simulation system.
 Responsible for loading and managing stock and options data.
 """
 
@@ -16,7 +16,7 @@ from src.models.pydantic_models import StockData, OptionData
 
 class DataManager:
     """
-    Manages data loading and processing for the portfolio risk-management simulation.
+    Manages data loading and processing for the hedge fund simulation.
     """
 
     def __init__(self, data_dir: str):

@@ -36,10 +36,11 @@ ENV/
 
 # OS
 .DS_Store
-Thumbs.db 
+Thumbs.db
 
 /data
-/results
+/results/*
+!/results/pakdd_final/
 /memory*
 
 *Zone.Identifier
@@ -52,3 +53,5 @@ env.py
 
 # Local-only helper scripts
 scripts/local/
+outputs/*
+results/pakdd_final/*

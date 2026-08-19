@@ -1,5 +1,5 @@
 """
-Portfolio Manager for the portfolio risk-management simulation system.
+Portfolio Manager for the hedge fund simulation system.
 Responsible for capital allocation, trade execution, and position management.
 """
 
@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from datetime import date, timedelta
 from typing import Dict, List
+import config
 
 # Import models and utilities
 from src.models.pydantic_models import (
@@ -27,7 +28,7 @@ class PortfolioManager:
     Manages portfolio allocation, trade execution, and position tracking.
     """
 
-    def __init__(self, data_manager, initial_capital: float = 1000000.0):
+    def __init__(self, data_manager, initial_capital: float = 1000000.0, config_obj=None):
         """
         Initialize the PortfolioManager.
 
@@ -36,14 +37,24 @@ class PortfolioManager:
             initial_capital: Initial capital for the portfolio.
         """
         self.data_manager = data_manager
+        self.config = config_obj
         self.initial_capital = initial_capital
         self.cash = initial_capital
         self.stock_positions = {}  # ticker -> StockPosition
         self.option_positions = []  # List of OptionPosition
         self.trades_history = []  # List of Trade
         self.portfolio_history = []  # List of Portfolio snapshots
+        self.cumulative_realized_pnl = 0.0  # Track actual realized P&L from closed positions
         self.max_leverage = 1.5
         self.margin_rate = 0.06
+
+    def _equity_fee(self, trade_value: float) -> float:
+        rate = getattr(self.config, "equity_transaction_cost_bps", 10.0) / 10_000.0
+        return abs(trade_value) * rate
+
+    def _option_fee(self, trade_value: float) -> float:
+        rate = getattr(self.config, "options_transaction_cost_bps", 20.0) / 10_000.0
+        return abs(trade_value) * rate
 
     def _buying_power(self, nav: float, cash: float) -> float:
         return cash + (self.max_leverage - 1.0) * nav
@@ -169,6 +180,7 @@ class PortfolioManager:
                 asset=ticker,
                 amount=allocation_amount,
                 percentage=normalized_weight,
+                action="buy",
                 rationale=(
                     f"Rule-based allocation based on {market_analysis.get(ticker).regime} regime "
                     f"and {market_analysis.get(ticker).sentiment_label} sentiment score "
@@ -184,6 +196,7 @@ class PortfolioManager:
             allocations=allocations,
             cash_reserve=self.cash - total_allocated,
             allocation_date=current_date,
+            rationale="Rule-based allocation without LLM.",
         )
 
         return portfolio_allocation
@@ -240,7 +253,7 @@ class PortfolioManager:
 
             # Compute trade value and fees
             trade_value = shares * price
-            fee = max(min(trade_value * 0.001, 20), 5)  # 0.1%, $5–$20
+            fee = self._equity_fee(trade_value)
 
             # Build Trade object
             trade = Trade(
@@ -284,6 +297,12 @@ class PortfolioManager:
             option.option_id, option.asset, current_date
         )
         if not option_data or "LAST" not in option_data:
+            import logging
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                f"Option ID '{option.option_id}' not found in available chain for {option.asset} on {current_date}. "
+                f"This option may have been hallucinated by the LLM. Skipping trade."
+            )
             raise ValueError(
                 f"Could not retrieve current price for option {option.option_id} on {current_date}."
             )
@@ -296,7 +315,7 @@ class PortfolioManager:
         # Calculate total trade value (each contract covers 100 shares)
         trade_value = current_price * option.contracts * 100
         # Apply transaction fee (adjust as needed)
-        fee = max(min(trade_value * 0.001, 200), 5)
+        fee = self._option_fee(trade_value)
 
         if option.action == "buy":
             # For a buy, ensure sufficient cash and then add the option position normally.
@@ -307,6 +326,7 @@ class PortfolioManager:
             self.cash -= trade_value + fee
             option.paid_amount = trade_value + fee
             option.market_value = trade_value
+            option.unrealized_pnl = option.market_value - option.paid_amount
             # Add the option to the portfolio (as a long position) if not already present.
             # (Assuming each buy is a new position; you may also aggregate if desired.)
             self.option_positions.append(option)
@@ -335,6 +355,8 @@ class PortfolioManager:
                     action="sell",
                     strategy=option.strategy,
                 )
+                # Calculate unrealized P&L: for short positions, this will be negative if option value increased
+                short_position.unrealized_pnl = short_position.market_value - short_position.paid_amount
                 self.option_positions.append(short_position)
             else:
                 # Update the existing short position.
@@ -448,12 +470,25 @@ class PortfolioManager:
                 new_shares = position.shares + shares
                 if position.shares < 0 and new_shares > 0:
                     # closed shorts and opened a long
+                    # Realize P&L from the short portion
+                    closed_shares = abs(position.shares)
+                    realized_pnl = (position.average_price - price) * closed_shares
+                    self.cumulative_realized_pnl += realized_pnl
                     position.average_price = price
                 elif position.shares < 0 and new_shares == 0:
                     # just closed out the short—no position left
+                    closed_shares = abs(position.shares)
+                    realized_pnl = (position.average_price - price) * closed_shares
+                    self.cumulative_realized_pnl += realized_pnl
                     del self.stock_positions[ticker]
                     return
-                # else either adding to an existing long or reducing a short without flipping
+                elif position.shares < 0 and new_shares < 0:
+                    # Partially covering a short position
+                    # Realize P&L on the covered portion
+                    realized_pnl = (position.average_price - price) * shares
+                    self.cumulative_realized_pnl += realized_pnl
+                    # Average price stays the same for shorts when covering
+                # else adding to an existing long
                 total_cost = (
                     position.average_price * abs(position.shares) + price * shares
                 )
@@ -478,15 +513,42 @@ class PortfolioManager:
                 new_shares = position.shares - shares
 
                 if position.shares > 0 and new_shares < 0:
-                    # flipped from long → short
+                    # Would flip from long → short
+                    # Check if short selling is allowed
+                    allow_short = getattr(config, "ALLOW_SHORT_SELLING", False)
+                    if not allow_short:
+                        # Only close the long position, don't go short
+                        realized_pnl = (price - position.average_price) * position.shares
+                        self.cumulative_realized_pnl += realized_pnl
+                        del self.stock_positions[ticker]
+                        # Refund the excess shares that would have gone short
+                        excess_shares = abs(new_shares)
+                        refund = excess_shares * price
+                        self.cash += refund
+                        print(f"Short selling disabled: Closed {position.shares} shares of {ticker}, refunded ${refund:.2f} for {excess_shares} excess shares")
+                        return
+
+                    # Short selling allowed - flip from long → short
+                    # Realize P&L from closing the long portion
+                    realized_pnl = (price - position.average_price) * position.shares
+                    self.cumulative_realized_pnl += realized_pnl
                     short_shares = abs(new_shares)
                     position.shares = -short_shares
                     position.average_price = price
 
                 elif position.shares > 0 and new_shares == 0:
                     # just closed the long
+                    realized_pnl = (price - position.average_price) * position.shares
+                    self.cumulative_realized_pnl += realized_pnl
                     del self.stock_positions[ticker]
                     return
+
+                elif position.shares > 0 and new_shares > 0:
+                    # Partially closing a long position
+                    realized_pnl = (price - position.average_price) * shares
+                    self.cumulative_realized_pnl += realized_pnl
+                    position.shares = new_shares
+                    # average_price stays the same for reducing a long
 
                 elif position.shares < 0:
                     # adding to an existing short
@@ -497,13 +559,17 @@ class PortfolioManager:
                     position.average_price = total_proceeds / total_shorts
                     position.shares = -total_shorts
 
-                else:
-                    # reducing a long but still net long
-                    position.shares = new_shares
-                    # average_price stays the same for reducing a long
-
             else:
-                # opening a brand‑new short
+                # Would open a brand‑new short
+                allow_short = getattr(config, "ALLOW_SHORT_SELLING", False)
+                if not allow_short:
+                    # Refund the cash and skip this trade
+                    refund = shares * price
+                    self.cash += refund
+                    print(f"Short selling disabled: Skipped opening {shares} share short position in {ticker}, refunded ${refund:.2f}")
+                    return
+
+                # Short selling allowed - open brand‑new short
                 position = StockPosition(
                     asset=ticker,
                     shares=-shares,
@@ -561,11 +627,19 @@ class PortfolioManager:
                 # For a long option (action "buy"), closing the position is equivalent to selling.
                 # For a short option (action "sell"), closing the position is equivalent to buying (covering).
                 if position.action == "buy":
+                    # Long option expiring - realize the P&L
+                    realized_pnl = position.market_value - position.paid_amount
                     self.cash += position.market_value
                     trade_action = "sell"
                 else:
+                    # Short option expiring - realize the P&L
+                    # paid_amount is negative (credit), market_value is negative (liability)
+                    realized_pnl = position.paid_amount - abs(position.market_value)
                     self.cash -= abs(position.market_value)
                     trade_action = "buy"
+
+                # Track realized P&L
+                self.cumulative_realized_pnl += realized_pnl
 
                 # Create a trade record for the expiration event
                 trade = Trade(
@@ -621,7 +695,8 @@ class PortfolioManager:
         unrealized_pnl = sum(
             position.unrealized_pnl for position in self.stock_positions.values()
         )
-        realized_pnl = total_value - self.initial_capital - unrealized_pnl
+        # Use tracked realized P&L instead of calculating from formula
+        realized_pnl = self.cumulative_realized_pnl
 
         # Create portfolio snapshot
         portfolio = Portfolio(
@@ -700,17 +775,22 @@ class PortfolioManager:
                     current_price = option.premium_per_contract
 
             trade_value = current_price * option.contracts * 100
-            fee = max(min(trade_value * 0.001, 5), 200)  # Transaction fee
+            fee = self._option_fee(trade_value)
 
             if option.action == "buy":
                 # Selling a long option: add cash
+                # Realized P&L = proceeds - what we paid
+                realized_pnl = trade_value - fee - option.paid_amount
                 print(
-                    f"Selling long option {option.option_id} at ${current_price:.2f} for a total of ${trade_value:.2f}"
+                    f"Selling long option {option.option_id} at ${current_price:.2f} (bought at ${option.premium_per_contract:.2f}) for a total of ${trade_value:.2f}"
                 )
                 self.cash += trade_value - fee
                 trade_action = "sell"
             elif option.action == "sell":
                 # Covering a short option: buy back, so deduct cash
+                # Realized P&L = what we received initially - buyback cost
+                # paid_amount is negative (credit received), so: paid_amount - (trade_value + fee)
+                realized_pnl = option.paid_amount - (trade_value + fee)
                 print(
                     f"Covering short option {option.option_id} at ${current_price:.2f} for a total of ${trade_value:.2f}"
                 )
@@ -718,6 +798,9 @@ class PortfolioManager:
                 trade_action = "buy"
             else:
                 raise ValueError("Invalid option action. Must be 'buy' or 'sell'.")
+
+            # Track realized P&L
+            self.cumulative_realized_pnl += realized_pnl
 
             # Create trade record
             trade = Trade(
@@ -752,31 +835,54 @@ class PortfolioManager:
 
             if current_price:
                 shares = position.shares
-                sale_value = current_price * shares
-                # Apply transaction fee (simplified)
-                fee = max(min(sale_value * 0.001, 200), 5)  # 0.1% with min $5, max $20
 
-                # Create trade object
-                trade = Trade(
-                    asset=ticker,
-                    trade_date=current_date,
-                    trade_type="stock",
-                    action="sell",
-                    quantity=shares,
-                    price=current_price,
-                    total_value=sale_value,
-                    fees=fee,
-                )
+                # For long positions: selling positive shares
+                # For short positions: buying back negative shares (closing the short)
+                if shares > 0:
+                    # Closing long position
+                    sale_value = current_price * shares
+                    fee = self._equity_fee(sale_value)
+                    realized_pnl = (current_price - position.average_price) * shares - fee
 
-                # Update cash
-                self.cash += sale_value - fee
+                    trade = Trade(
+                        asset=ticker,
+                        trade_date=current_date,
+                        trade_type="stock",
+                        action="sell",
+                        quantity=shares,
+                        price=current_price,
+                        total_value=sale_value,
+                        fees=fee,
+                    )
 
-                # Add trade to history
+                    self.cash += sale_value - fee
+                    print(f"Closing long: Sold {shares} shares of {ticker} at ${current_price:.2f} for ${sale_value:.2f}")
+
+                elif shares < 0:
+                    # Closing short position (buying back)
+                    abs_shares = abs(shares)
+                    buy_value = current_price * abs_shares
+                    fee = self._equity_fee(buy_value)
+                    # For shorts: profit if current price < average price (we sold high, buying back low)
+                    realized_pnl = (position.average_price - current_price) * abs_shares - fee
+
+                    trade = Trade(
+                        asset=ticker,
+                        trade_date=current_date,
+                        trade_type="stock",
+                        action="buy",  # Closing a short is a buy action
+                        quantity=abs_shares,
+                        price=current_price,
+                        total_value=buy_value,
+                        fees=fee,
+                    )
+
+                    self.cash -= buy_value + fee
+                    print(f"Closing short: Bought back {abs_shares} shares of {ticker} at ${current_price:.2f} for ${buy_value:.2f}")
+
+                # Track cumulative realized P&L
+                self.cumulative_realized_pnl += realized_pnl
                 self.trades_history.append(trade)
-
-                print(
-                    f"Selling {shares} shares of {ticker} at ${current_price:.2f} for a total of ${sale_value:.2f}"
-                )
 
                 # Remove the stock position
                 del self.stock_positions[ticker]
@@ -963,7 +1069,7 @@ class PortfolioManager:
         if future_price is not None:
             # Compute last known price from stored market value (if contracts > 0)
             if position.contracts > 0:
-                last_known_price = position.market_value / (position.contracts * 100)
+                last_known_price = abs(position.market_value) / (position.contracts * 100)
             else:
                 last_known_price = (
                     position.premium_per_contract
@@ -974,7 +1080,11 @@ class PortfolioManager:
             if np.isnan(option_value):
                 option_value = 0.0
             position.market_value = option_value
-            position.unrealized_pnl = position.market_value - position.paid_amount
+            position.unrealized_pnl = position.market_value - abs(position.paid_amount)
+            # Handle short positions
+            if position.action == "sell":
+                position.market_value = -position.market_value
+                position.unrealized_pnl = -position.unrealized_pnl
         else:
             # No valid future data found; sell the option at the last known price
             if position.contracts > 0:

@@ -34,7 +34,7 @@ class RewardConfig(BaseModel):
     lambda_sigma: float = 0.5
     lambda_drawdown: float = 0.5
     reward_clip_range: Tuple[float, float] = (-1.0, 1.0)
-    
+
 class ReflectionConfig(BaseModel):
     reflection: str
 
@@ -42,16 +42,16 @@ class RewardCalculator:
     """
     Base class for reward calculators.
     """
-    
+
     def __init__(self, config: RewardConfig = None):
         """
         Initialize reward calculator.
-        
+
         Args:
             config: Configuration for reward calculation.
         """
         self.config = config or RewardConfig()
-    
+
     def calculate_reward(
         self,
         return_component: float = 0.0,
@@ -125,7 +125,7 @@ class PortfolioRewardCalculator(RewardCalculator):
     """
     Reward calculator for portfolio-level decisions.
     """
-    
+
     def calculate_reward(
         self,
         previous_value: float,
@@ -152,7 +152,7 @@ class PortfolioRewardCalculator(RewardCalculator):
         reward = portfolio_return - variance_penalty - drawdown_penalty
         reward = float(np.clip(reward, *self.config.reward_clip_range))
         return reward
-    
+
     def _calculate_turnover(
         self,
         previous_allocation: Dict[str, float],
@@ -160,31 +160,31 @@ class PortfolioRewardCalculator(RewardCalculator):
     ) -> float:
         """
         Calculate portfolio turnover.
-        
+
         Args:
             previous_allocation: Previous asset allocation.
             current_allocation: Current asset allocation.
-            
+
         Returns:
             Turnover value.
         """
         # Get all assets
         all_assets = set(previous_allocation.keys()) | set(current_allocation.keys())
-        
+
         # Calculate absolute changes
         turnover = 0.0
         for asset in all_assets:
             prev_alloc = previous_allocation.get(asset, 0.0)
             curr_alloc = current_allocation.get(asset, 0.0)
             turnover += abs(curr_alloc - prev_alloc)
-        
+
         return turnover
 
 class AssetRewardCalculator(RewardCalculator):
     """
     Reward calculator for asset-level decisions.
     """
-    
+
     def calculate_reward(
         self,
         stock_return: float,
@@ -196,7 +196,7 @@ class AssetRewardCalculator(RewardCalculator):
     ) -> float:
         """
         Calculate reward for an asset allocation decision.
-        
+
         Args:
             stock_return: Stock return.
             options_return: Options return.
@@ -204,7 +204,7 @@ class AssetRewardCalculator(RewardCalculator):
             stock_percentage: Percentage allocated to stock.
             options_percentage: Percentage allocated to options.
             transaction_costs: Transaction costs.
-            
+
         Returns:
             Reward value.
         """
@@ -222,7 +222,7 @@ class HedgingRewardCalculator(RewardCalculator):
     """
     Reward calculator for hedging-level decisions.
     """
-    
+
     def calculate_reward(
         self,
         stock_return: float,
@@ -234,7 +234,7 @@ class HedgingRewardCalculator(RewardCalculator):
     ) -> float:
         """
         Calculate reward for a hedging strategy decision.
-        
+
         Args:
             stock_return: Stock return.
             options_return: Options return.
@@ -242,7 +242,7 @@ class HedgingRewardCalculator(RewardCalculator):
             stock_only_volatility: Volatility of stock-only position.
             option_costs: Option costs.
             strategy_type: Type of hedging strategy.
-            
+
         Returns:
             Reward value.
         """
@@ -263,16 +263,16 @@ class HedgingRewardCalculator(RewardCalculator):
         reward = float(np.clip(reward, *self.config.reward_clip_range))
 
         return reward
-    
+
     def _estimate_correlation(self, stock_return: float, options_return: float) -> float:
         """
         Estimate correlation between stock and options returns.
         This is a simplified version since we only have point values.
-        
+
         Args:
             stock_return: Stock return.
             options_return: Options return.
-            
+
         Returns:
             Estimated correlation.
         """
@@ -280,7 +280,7 @@ class HedgingRewardCalculator(RewardCalculator):
         # In practice, you'd use a time series of returns
         if stock_return == 0 or options_return == 0:
             return 0.0
-        
+
         # If both returns have the same sign, positive correlation
         # If opposite signs, negative correlation
         if (stock_return > 0 and options_return > 0) or (stock_return < 0 and options_return < 0):
@@ -292,16 +292,16 @@ class WhatIfCalculator:
     """
     Calculator for what-if comparisons.
     """
-    
+
     def __init__(self, data_manager: Any):
         """
         Initialize what-if calculator.
-        
+
         Args:
             data_manager: Data manager for accessing market data.
         """
         self.data_manager = data_manager
-    
+
     def calculate_portfolio_what_if(
         self,
         actual_allocation: Dict[str, float],
@@ -312,14 +312,14 @@ class WhatIfCalculator:
     ) -> Dict[str, Any]:
         """
         Calculate what-if scenarios for portfolio allocation.
-        
+
         Args:
             actual_allocation: Actual asset allocation.
             alternative_allocations: Alternative asset allocations.
             start_date: Start date.
             end_date: End date.
             initial_portfolio_value: Initial portfolio value.
-            
+
         Returns:
             What-if comparison results.
         """
@@ -327,7 +327,7 @@ class WhatIfCalculator:
         actual_performance = self._calculate_allocation_performance(
             actual_allocation, start_date, end_date, initial_portfolio_value
         )
-        
+
         # Calculate alternative performances
         alternative_performances = []
         for i, alt_allocation in enumerate(alternative_allocations):
@@ -339,22 +339,22 @@ class WhatIfCalculator:
                 "allocation": alt_allocation,
                 "performance": alt_performance
             })
-        
+
         # Find best alternative
         best_alternative = max(
             alternative_performances,
             key=lambda x: x["performance"]["final_value"],
             default=None
         )
-        
+
         # Calculate regret (difference between best alternative and actual)
         regret = 0.0
         if best_alternative:
             regret = (
-                best_alternative["performance"]["final_value"] - 
+                best_alternative["performance"]["final_value"] -
                 actual_performance["final_value"]
             ) / initial_portfolio_value
-        
+
         return {
             "actual_allocation": actual_allocation,
             "actual_performance": actual_performance,
@@ -362,7 +362,7 @@ class WhatIfCalculator:
             "best_alternative": best_alternative,
             "regret": regret
         }
-    
+
     def _calculate_allocation_performance(
         self,
         allocation: Dict[str, float],
@@ -372,33 +372,33 @@ class WhatIfCalculator:
     ) -> Dict[str, Any]:
         """
         Calculate performance of an allocation.
-        
+
         Args:
             allocation: Asset allocation.
             start_date: Start date.
             end_date: End date.
             initial_value: Initial value.
-            
+
         Returns:
             Performance metrics.
         """
         # This is a placeholder implementation
         # In practice, you'd use the data manager to get actual price data
         # and calculate the performance based on that
-        
+
         # For now, we'll generate random returns
         days = (end_date - start_date).days
         daily_returns = np.random.normal(0.0005, 0.01, days)  # Mean 0.05% daily, 1% std
-        
+
         # Calculate cumulative return
         cumulative_return = np.prod(1 + daily_returns) - 1
-        
+
         # Calculate volatility
         volatility = np.std(daily_returns) * np.sqrt(252)  # Annualized
-        
+
         # Calculate final value
         final_value = initial_value * (1 + cumulative_return)
-        
+
         return {
             "cumulative_return": cumulative_return,
             "volatility": volatility,
@@ -410,7 +410,7 @@ class ReflectionGenerator:
     """
     Generator for reflections on experiences.
     """
-    
+
     def __init__(
         self,
         llm_client: Any,
@@ -419,7 +419,7 @@ class ReflectionGenerator:
     ):
         """
         Initialize reflection generator.
-        
+
         Args:
             llm_client: Client for LLM API.
             memory_store: Experience memory store.
@@ -428,7 +428,7 @@ class ReflectionGenerator:
         self.llm_client = llm_client
         self.memory_store = memory_store
         self.prompt_templates = prompt_templates or PromptTemplates()
-    
+
     def generate_reflection(
         self,
         experience: Experience,
@@ -436,11 +436,11 @@ class ReflectionGenerator:
     ) -> str:
         """
         Generate a reflection on an experience.
-        
+
         Args:
             experience: Experience to reflect on.
             similar_experiences: List of similar past experiences.
-            
+
         Returns:
             Reflection text.
         """
@@ -449,53 +449,53 @@ class ReflectionGenerator:
             experience=experience,
             similar_experiences=similar_experiences
         )
-        
+
         # Generate reflection using LLM
         try:
             reflection = self.llm_client.generate_text(prompt, ReflectionConfig)
-            
+
             # Clean up reflection (remove any JSON formatting, etc.)
             reflection = reflection.reflection
-            
+
             # Update experience with reflection
             self.memory_store.add_reflection(experience.id, reflection)
-            
+
             return reflection
-        
+
         except Exception as e:
             logger.error(f"Error generating reflection: {str(e)}")
             return "Error generating reflection."
-    
+
     def _clean_reflection(self, reflection: str) -> str:
         """
         Clean up reflection text.
-        
+
         Args:
             reflection: Raw reflection text.
-            
+
         Returns:
             Cleaned reflection text.
         """
         # Remove any JSON or code blocks
         reflection = re.sub(r'```json.*?```', '', reflection, flags=re.DOTALL)
         reflection = re.sub(r'```.*?```', '', reflection, flags=re.DOTALL)
-        
+
         # Remove any markdown formatting
         reflection = re.sub(r'#+ ', '', reflection)
-        
+
         # Remove excessive newlines
         reflection = re.sub(r'\n{3,}', '\n\n', reflection)
-        
+
         # Trim whitespace
         reflection = reflection.strip()
-        
+
         return reflection
 
 class RewardAndReflectionSystem:
     """
     Combined system for reward calculation and reflection generation.
     """
-    
+
     def __init__(
         self,
         llm_client: Any,
@@ -506,7 +506,7 @@ class RewardAndReflectionSystem:
     ):
         """
         Initialize reward and reflection system.
-        
+
         Args:
             llm_client: Client for LLM API.
             data_manager: Data manager for accessing market data.
@@ -519,20 +519,20 @@ class RewardAndReflectionSystem:
         self.memory_store = memory_store
         self.reward_config = reward_config or RewardConfig()
         self.prompt_templates = prompt_templates or PromptTemplates()
-        
+
         # Initialize calculators
         self.portfolio_calculator = PortfolioRewardCalculator(self.reward_config)
         self.asset_calculator = AssetRewardCalculator(self.reward_config)
         self.hedging_calculator = HedgingRewardCalculator(self.reward_config)
         self.what_if_calculator = WhatIfCalculator(data_manager)
-        
+
         # Initialize reflection generator
         self.reflection_generator = ReflectionGenerator(
             llm_client=llm_client,
             memory_store=memory_store,
             prompt_templates=prompt_templates
         )
-    
+
     def process_portfolio_outcome(
         self,
         date_val: date,
@@ -596,13 +596,13 @@ class RewardAndReflectionSystem:
             "transaction_costs": transaction_costs,
             "reward": reward
         }
-        
+
         # Add what-if comparison if enabled
         if self.reward_config.use_what_if_comparison:
             # This would require alternative allocations and historical data
             # For now, we'll skip this
             pass
-        
+
         # Add experience to memory
         experience_id = self.memory_store.add_portfolio_experience(
             date_val=date_val,
@@ -613,7 +613,7 @@ class RewardAndReflectionSystem:
             market_regime=market_regime,
             confidence=confidence
         )
-        
+
         # Generate reflection if requested
         reflection = ""
         if generate_reflection:
@@ -627,15 +627,15 @@ class RewardAndReflectionSystem:
                     assets=assets,
                     num_experiences=3
                 )
-                
+
                 # Generate reflection
                 reflection = self.reflection_generator.generate_reflection(
                     experience=experience,
                     similar_experiences=similar_experiences
                 )
-        
+
         return reward, experience_id, reflection
-    
+
     def process_asset_outcome(
         self,
         date_val: date,
@@ -654,7 +654,7 @@ class RewardAndReflectionSystem:
     ) -> Tuple[float, str, str]:
         """
         Process outcome of an asset allocation decision.
-        
+
         Args:
             date_val: Date of the decision.
             asset: Asset ticker.
@@ -669,7 +669,7 @@ class RewardAndReflectionSystem:
             market_regime: Market regime.
             confidence: Confidence in the decision.
             generate_reflection: Whether to generate a reflection.
-            
+
         Returns:
             Tuple of (reward, experience_id, reflection).
         """
@@ -682,7 +682,7 @@ class RewardAndReflectionSystem:
             options_percentage=options_percentage,
             transaction_costs=transaction_costs
         )
-        
+
         # Create outcome dictionary
         outcome = {
             "stock_return": stock_return,
@@ -692,7 +692,7 @@ class RewardAndReflectionSystem:
             "transaction_costs": transaction_costs,
             "reward": reward
         }
-        
+
         # Add experience to memory
         experience_id = self.memory_store.add_asset_experience(
             date_val=date_val,
@@ -703,7 +703,7 @@ class RewardAndReflectionSystem:
             market_regime=market_regime,
             confidence=confidence
         )
-        
+
         # Generate reflection if requested
         reflection = ""
         if generate_reflection:
@@ -717,15 +717,15 @@ class RewardAndReflectionSystem:
                     market_regime=market_regime,
                     num_experiences=3
                 )
-                
+
                 # Generate reflection
                 reflection = self.reflection_generator.generate_reflection(
                     experience=experience,
                     similar_experiences=similar_experiences
                 )
-        
+
         return reward, experience_id, reflection
-    
+
     def process_hedging_outcome(
         self,
         date_val: date,
@@ -744,7 +744,7 @@ class RewardAndReflectionSystem:
     ) -> Tuple[float, str, str]:
         """
         Process outcome of a hedging strategy decision.
-        
+
         Args:
             date_val: Date of the decision.
             asset: Asset ticker.
@@ -759,7 +759,7 @@ class RewardAndReflectionSystem:
             market_regime: Market regime.
             confidence: Confidence in the decision.
             generate_reflection: Whether to generate a reflection.
-            
+
         Returns:
             Tuple of (reward, experience_id, reflection).
         """
@@ -772,7 +772,7 @@ class RewardAndReflectionSystem:
             option_costs=option_costs,
             strategy_type=strategy_type
         )
-        
+
         # Create outcome dictionary
         outcome = {
             "stock_return": stock_return,
@@ -784,7 +784,7 @@ class RewardAndReflectionSystem:
             "option_costs": option_costs,
             "reward": reward
         }
-        
+
         # Add experience to memory
         experience_id = self.memory_store.add_hedging_experience(
             date_val=date_val,
@@ -796,7 +796,7 @@ class RewardAndReflectionSystem:
             market_regime=market_regime,
             confidence=confidence
         )
-        
+
         # Generate reflection if requested
         reflection = ""
         if generate_reflection:
@@ -811,11 +811,11 @@ class RewardAndReflectionSystem:
                     market_regime=market_regime,
                     num_experiences=3
                 )
-                
+
                 # Generate reflection
                 reflection = self.reflection_generator.generate_reflection(
                     experience=experience,
                     similar_experiences=similar_experiences
                 )
-        
+
         return reward, experience_id, reflection

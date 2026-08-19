@@ -1,75 +1,133 @@
-# Modular Decision Systems for Robustness
+# MultiHedge
 
-Public companion repository for the paper **"Beyond Scale: The Role of Memory
-in Robust Modular Decision Systems."**
+## Code and experiments for two publications
 
-The code implements a modular financial-control testbed used to study how
-robust behavior changes when retrieval memory, coordinator model capacity, and
-execution constraints are varied independently. The system combines structured
-LLM-based coordination, retrieval-augmented episodic memory, and deterministic
-hedging modules.
+This repository contains the MultiHedge implementation and experimental code
+supporting both publications:
 
-This repository is a code and experiment companion, not a bundled data release.
-The historical vendor datasets used for the paper are not stored in git.
+1. Feliks Bańka and Jarosław A. Chudziak,
+   [*MultiHedge: Adaptive Coordination via Retrieval-Augmented Control*](https://link.springer.com/chapter/10.1007/978-3-032-29924-6_39),
+   in *Computational Science – ICCS 2026*, Lecture Notes in Computer Science,
+   vol. 16784, pp. 446–454, Springer, 2026.
+2. *When Memory Is Not Enough: What Drives Robustness in AI Decision Systems?
+   Evidence from Sequential Financial Decision-Making*.
 
-## Repository Layout
+The [original conference-version repository](https://github.com/latent-systems-lab/MultiHedge)
+is retained as the artifact accompanying the ICCS paper. This repository
+contains the extended implementation and robustness experiments used in the
+second paper.
 
-- `main.py` - command-line entry point for simulations.
-- `config.py` - default experiment settings.
-- `src/` - simulator, agents, memory, models, and utilities.
-- `experiments/` - packaged experiment runners.
-- `scripts/` - data generation and LLM usage utilities.
-- `REPRODUCING.md` - reproduction workflow and data requirements.
+MultiHedge is the financial evaluation system used in the study. It combines language-model-guided
+portfolio reasoning, classical hedging strategies, and retrieval-augmented
+memory reinforcement learning (RL) to stress-test stock/option allocations.
+`main.py` orchestrates the full workflow—loading market data, calling the LLM for
+regime assessment, coordinating the specialized hedging agents, and optionally
+including the reflective memory-RL module to adapt allocations over time.
 
-## Quick Start
+## 🧠 System overview
+- **LLM-driven coordinator:** `main.py` wires CLI arguments into an
+  `ExtendedSimulationConfig`, instantiates the `Coordinator`, and drives the
+  simulation/plotting pipeline so you can programmatically toggle assets,
+  hedging strategies, and memory-RL participation per run.
+- **Optional retrieval-augmented RL:** `config.py` exposes `use_memory_rl` and
+  related knobs so you can enable/disable the experience store and reflection
+  loop without touching code; the same flag is forwarded via `--use-memory-rl`
+  when running the simulator from the command line.
+- **Structured outputs:** Runs can persist CSV/JSON summaries and Matplotlib
+  charts inside `results/`, making it easy to compare multiple portfolios.
+  Performance metrics are captured via `save_simulation_results`, and plots are
+  written alongside those tables when `--generate-plots` is set.
 
+## ⚙️ Prerequisites & installation
+1. **Python**: Install Python 3.10+ (the project relies on modern typing and
+   `pydantic` v2 features).
+2. **Dependencies**: Install the runtime stack with:
+   ```bash
+   python -m venv .venv && source .venv/bin/activate  # optional but recommended
+   pip install -r requirements.txt
+   ```
+   The pinned packages cover data science utilities (NumPy, pandas, SciPy),
+   plotting (Matplotlib), model serving (OpenAI + Google Generative AI SDKs),
+   and RL baselines (Gym, Stable-Baselines3, PyTorch).
+   `requirements.txt` contains supported dependency constraints rather than a
+   historical bit-for-bit lockfile. See `REPRODUCING.md` for environment capture.
+3. **Environment variables**: Copy `.env.example` to `.env`, fill in the LLM and
+   market-data API keys, and adjust defaults (provider/model) as needed. The
+   configuration layer reads `LLM_PROVIDER`, `LLM_MODEL`, and related secrets at
+   runtime, so the simulator will automatically pick up your `.env` values.
+
+## 📦 Data requirements
+Place the following assets under `data/` before running simulations:
+- **Price history**: One CSV per equity ticker with OHLCV columns
+  (`data/AAPL.csv`, `data/NVDA.csv`, …).
+- **Options chains**: A SQLite database per ticker (e.g., `data/aapl_options.db`)
+  containing rows keyed by `QUOTE_DATE`, strike, option type, and greeks so the
+  hedging agents can price/size strategies.
+- **Macro/alternative data**: Earnings cadence/growth (`earnings.csv`), CPI
+  releases (`cpi.csv`), VIX levels (`vix.csv`), and sentiment (`fear-greed-2011-2023.csv`).
+  Real, non-synthetic daily OHLCV data in the research environment was sourced
+  from Yahoo Finance. Historical option chains were sourced from OptionsDX and
+  cannot be redistributed by the authors under the provider's commercial terms.
+  The broad-market check uses SPY as an S&P 500 proxy. See `REPRODUCING.md` for
+  the complete data and experiment map.
+
+Need seed data quickly? Run the helper and it will synthesize every required
+file for AAPL/NVDA/TSLA:
 ```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-cp .env.example .env
+python scripts/generate_sample_data.py
 ```
+The script logs each artifact it writes, so you can confirm `data/` is fully
+populated before launching longer simulations.
 
-Fill `.env` with the LLM credentials for the backend you want to use.
-
-For a development-only synthetic data setup:
-
+## 🚀 Usage examples
+### Run the multi-agent simulator
 ```bash
-python3 scripts/generate_sample_data.py
-```
-
-For the paper workflow and required historical data layout, see
-[REPRODUCING.md](REPRODUCING.md).
-
-## Example Run
-
-```bash
-python3 main.py \
-  --start-date 2021-01-01 \
-  --end-date 2023-12-31 \
-  --assets AAPL TSLA NVDA \
+python main.py \
+  --start-date 2023-01-03 \
+  --end-date 2023-03-30 \
+  --assets AAPL NVDA TSLA \
   --hedging-strategies collar straddle delta-neutral \
   --use-llm \
   --use-memory-rl True \
-  --output-dir results/main_full_llm
+  --output-dir results/custom_run
 ```
+Key flags:
+- `--use-llm` / `--no-llm` toggle the language model allocator; pair with the
+  environment variables in `.env` to switch between OpenAI and Gemini backends.
+- `--use-memory-rl` accepts `True/False` so you can benchmark reflective memory
+  loops vs. pure LLM guidance.
+- `--equal-options-strategy-split` forces uniform capital splits across hedging
+  agents; omit it to let the coordinator allocate dynamically.
 
-## Experiment Runners
+### Inspect outputs
+- **Directory layout**: By default, results live under
+  `results/PAKDD/openai/` (configurable via `config.DEFAULT_OUTPUT_DIR`), so
+  `--output-dir` lets you create scenario-specific folders such as
+  `results/january_llm_off`.
+- **Tables**: Each run emits `performance.csv` (daily KPIs), `summary.json`
+  (aggregated returns/drawdown/breakdowns), and `final_portfolio.json` (end-state
+  holdings) inside the chosen output directory.
+- **Plots**: When `--generate-plots` is passed, `performance_plot.png` is saved
+  alongside the tables, letting you visually compare equity curves.
 
-Strategy and model ablations:
-
+### Monitor LLM usage
+Every call to the language model appends metadata (timestamp, latency, token
+counts, status) to `llm_usage.jsonl` inside the same output directory, enabling
+post-run auditability. Analyze a single day’s
+log slice via:
 ```bash
-python3 experiments/run_multi_model_studies.py --group paper-ablation
+python scripts/llm_usage_one_day.py --date 2023-01-10 --usage-log results/custom_run/llm_usage.jsonl
 ```
+The helper bootstraps a one-day simulation (respecting `config.py`) and prints
+aggregate token/latency totals so you can verify usage-based cost budgets.
 
-Available groups are:
+## 🧰 Auxiliary tooling
+- `scripts/generate_sample_data.py`: quickly populate `data/` with synthetic
+  equities, options, and macro indicators for development or demos.
+- `scripts/llm_usage_one_day.py`: run a constrained trading day and summarise the
+  accompanying `llm_usage.jsonl`, which is helpful for cost tracking or CI tests
+  that need deterministic runtimes.
 
-- `individual`
-- `all-strategies`
-- `pairs`
-- `providers`
-- `gpt-sweep`
-- `paper-ablation`
-
-Generated outputs are written under `results/`. Keep raw data, generated
-results, local `.env` files, and memory stores out of git.
+With the prerequisites satisfied, data staged, and environment variables set,
+you can iterate on hedging strategies, compare LLM vs. rules-only baselines, and
+inspect logs/plots in `results/` to validate every experiment end-to-end.

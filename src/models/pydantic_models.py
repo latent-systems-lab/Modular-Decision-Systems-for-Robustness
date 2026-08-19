@@ -1,5 +1,5 @@
 """
-Pydantic data models for the portfolio risk-management simulation system.
+Pydantic data models for the hedge fund simulation system.
 These models define the structure of data used throughout the application.
 """
 
@@ -47,10 +47,10 @@ class SplitResponse(BaseModel):
     stock_percentage: float = Field(ge=0.0, le=1.0)
     options_percentage: float = Field(ge=0.0, le=1.0)
     rationale: str
-            
+
 class CapitalAllocation(BaseModel):
     """Model representing capital allocation for assets in the portfolio."""
-    asset: Literal["AAPL", "NVDA", "TSLA"]
+    asset: str
     amount: float
     percentage: float = Field(ge=0.0, le=1.0)
     action: Literal["buy", "sell"]
@@ -63,7 +63,7 @@ class PortfolioAllocation(BaseModel):
     cash_reserve: float
     rationale: str
 
-    
+
 class HedgingStrategies(BaseModel):
     collar: float = Field(ge=0.0, le=1.0, default=0.0)
     straddle: float = Field(ge=0.0, le=1.0, default=0.0)
@@ -74,12 +74,12 @@ class AssetSplit(BaseModel):
     asset: str
     total_allocation: float
     stock_percentage: float = Field(ge=0.0, le=1.0)
-    stocks_action: Literal["buy", "sell"]
+    stocks_action: Literal["buy", "sell"] = "buy"
     options_percentage: float = Field(ge=0.0, le=1.0)
     stock_amount: float
     options_amount: float
     rationale: str
-    hedging_strategies: HedgingStrategies
+    hedging_strategies: HedgingStrategies = Field(default_factory=HedgingStrategies)
 
 
 class OptionPosition(BaseModel):
@@ -150,7 +150,7 @@ class DailyPerformance(BaseModel):
 class LLMRequest(BaseModel):
     """Model representing a request to the LLM API."""
     prompt: str
-    model: str = Field(default_factory=lambda: getattr(config, "LLM_MODEL", "gemini-2.5-flash"))
+    model: str = Field(default_factory=lambda: getattr(config, "LLM_MODEL", "gemini-2.5-flash-lite"))
     temperature: float = 0.3
     max_tokens: int = 1000
     response_format: Optional[Dict] = None
@@ -188,7 +188,7 @@ class CombinedAllocationSplitResponse(BaseModel):
     asset_splits: List[AssetSplit]
     cash_reserve: float
     rationale: str
-        
+
 class MarketRegime(BaseModel):
     """Model representing market regime analysis for an asset."""
 
@@ -273,8 +273,16 @@ class SimulationConfig(BaseModel):
     rebalance_frequency: int = 30  # days
     emergency_threshold: float = 0.1  # 10% drawdown triggers emergency rebalance
     use_llm: bool = True
+    controller_mode: Literal["full_llm", "retrieval_only", "random_retrieval", "no_memory"] = "full_llm"
     hedging_strategies: List[str] = []
+    equal_options_strategy_split: bool = False
     rule_based_strategy_split: bool = False
+    max_options_allocation_ratio: float = 0.03
+    max_collar_options_weight: float = 0.05
+    allow_short_selling: bool = False
+    equity_transaction_cost_bps: float = 10.0
+    options_transaction_cost_bps: float = 20.0
+    slippage_bps: float = 2.0
 
 class SimulationResult(BaseModel):
     """Model representing the final simulation results."""

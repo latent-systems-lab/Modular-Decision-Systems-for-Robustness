@@ -12,7 +12,7 @@ class BaseAgent(ABC):
         """
         Initialize the agent with a unique ID and type.
         Also initializes a performance metric (for future RL integration).
-        
+
         :param agent_id: Unique identifier for the agent.
         """
         self.agent_id = agent_id
@@ -23,7 +23,7 @@ class BaseAgent(ABC):
         """
         Must be implemented by subclasses.
         Should return a recommended trade action as a dictionary.
-        
+
         :param state: A dictionary representing the current state (market data, options data, etc.).
         :return: A dictionary with the recommended trade action.
         """
@@ -32,7 +32,7 @@ class BaseAgent(ABC):
     def update_performance(self, reward: float) -> None:
         """
         Update the agent's performance metric by adding the provided reward.
-        
+
         :param reward: The reward value to add.
         """
         self.performance += reward
@@ -40,7 +40,7 @@ class BaseAgent(ABC):
     def get_performance(self) -> float:
         """
         Retrieve the current performance metric for the agent.
-        
+
         :return: Current performance as a float.
         """
         return self.performance

@@ -1,5 +1,5 @@
 """
-Updated Straddle Agent for the portfolio risk-management simulation system.
+Updated Straddle Agent for the hedge fund simulation system.
 Implements a straddle strategy using near-the-money calls and puts.
 Uses simplified LLM response models and option lookup mechanism.
 """
@@ -95,11 +95,11 @@ class StraddleAgent(HedgingAgent):
             Design a straddle strategy by selecting:
             1. At-the-money call options
             2. At-the-money put options with the same strike and expiration
-            
+
             The goal is to profit from significant price movement in either direction.
             This strategy is most effective when you expect high volatility but are uncertain
             about the direction of the price movement.
-            
+
             For each option, provide:
             1. The option_id from the available options list
             2. The number of contracts to buy
@@ -328,13 +328,13 @@ class StraddleAgent(HedgingAgent):
         if isinstance(market_analysis, dict) is False:
             market_analysis = market_analysis.dict()
         prompt = f"""
-        You are a portfolio options strategist. Design a {self.strategy_type} hedging strategy for the following position:
-        
+        You are a hedge fund options strategist. Design a {self.strategy_type} hedging strategy for the following position:
+
         Asset: {ticker}
         Current Position: {stock_position.get('shares', 0)} shares at ${stock_position.get('average_price', 0):.2f} (Market Value: ${stock_position.get('market_value', 0):,.2f})
         Current Price: ${stock_position.get('current_price', 0):.2f}
         Available Capital for Options: ${available_capital:,.2f} - use all of it.
-        
+
         IMPORTANT: Ensure that the total cost of the recommended option contracts does not exceed the available capital. For example, if the ask price is $10 per share, then each contract costs $10 * 100 = $1,000. In that case, if the available capital is $5,000, recommend no more than 5 contracts.
         Remember to multiply the number of contracts by 100 to get the total cost.
         Note: Each option contract represents 100 shares. Calculate the cost per contract and ensure the total cost is within the available capital.
@@ -344,7 +344,7 @@ class StraddleAgent(HedgingAgent):
         - Sentiment Score: {market_analysis.get('sentiment', 0.0):.2f} ({market_analysis.get('sentiment_label', 'neutral')})
         - Outlook Score: {market_analysis.get('outlook', 0.0):.2f} ({market_analysis.get('outlook_label', 'balanced')})
         - Short-term Outlook: {market_analysis.get('short_term_outlook', 'stable')}
-        
+
         Available Options:
         """
 
@@ -361,7 +361,7 @@ class StraddleAgent(HedgingAgent):
         # Add strategy-specific instructions
         prompt += f"""
         {strategy_description}
-        
+
         Your response should be a JSON object with the following structure:
         {{
             "asset": "{ticker}",
@@ -383,7 +383,7 @@ class StraddleAgent(HedgingAgent):
             "estimated_cost": total_cost_estimate,
             "rationale": "Your rationale for the strategy, quantity of contracts, and option selection.",
         }}
-        
+
         IMPORTANT: Use only option_ids from the available options list above.
         """
 

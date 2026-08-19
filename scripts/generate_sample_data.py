@@ -27,17 +27,17 @@ def ensure_data_dir():
 def generate_stock_data():
     print("Generating Stock CSVs...")
     dates = pd.date_range(start=START_DATE, end=END_DATE, freq='B')
-    
+
     for ticker in TICKERS:
         # Random walk parameters
         start_price = 150 if ticker == "AAPL" else (200 if ticker == "TSLA" else 400)
         volatility = 0.02
-        
+
         prices = [start_price]
         for _ in range(len(dates) - 1):
             change = np.random.normal(0, volatility)
             prices.append(prices[-1] * (1 + change))
-            
+
         df = pd.DataFrame({
             "Date": dates,
             "Open": [p * 0.99 for p in prices],
@@ -46,68 +46,68 @@ def generate_stock_data():
             "Close": prices,
             "Volume": np.random.randint(1000000, 5000000, len(dates))
         })
-        
+
         # Save as required by DataManager: data/{TICKER}.csv
         path = os.path.join(DATA_DIR, f"{ticker}.csv")
         df.to_csv(path, index=False)
         print(f"  Saved {path}")
-        
+
     return dates
 
 # --- 2. Generate Options Data (SQLite DB) ---
 def black_scholes(S, K, T, r, sigma, is_call):
     if T <= 0: return max(0, S - K) if is_call else max(0, K - S), 0, 0, 0, 0, 0
-    
+
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
-    
+
     if is_call:
         price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
         delta = norm.cdf(d1)
     else:
         price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
         delta = norm.cdf(d1) - 1
-        
+
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
     vega = S * np.sqrt(T) * norm.pdf(d1) / 100
     theta = - (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) / 365
     rho = 0 # Simplified
-    
+
     return price, delta, gamma, vega, theta, rho
 
 def generate_options_db(dates):
     print("Generating Options SQLite DBs (this may take a moment)...")
-    
+
     for ticker in TICKERS:
         # Load the stock price we just generated to ensure consistency
         stock_df = pd.read_csv(os.path.join(DATA_DIR, f"{ticker}.csv"))
         stock_df['Date'] = pd.to_datetime(stock_df['Date'])
-        
+
         all_options = []
-        
+
         # Generate options for every 5th day to save time/space (simulation will interpolate or skip)
         for _, row in stock_df.iloc[::5].iterrows():
             current_date = row['Date']
             spot = row['Close']
-            
+
             # Create expirations: 30 days and 60 days out
             expirations = [current_date + timedelta(days=30), current_date + timedelta(days=60)]
-            
+
             for expire_date in expirations:
                 dte = (expire_date - current_date).days
                 T = dte / 365.0
-                
+
                 # Strikes: +/- 10% of spot
                 strikes = np.linspace(spot * 0.9, spot * 1.1, 5)
-                
+
                 for strike in strikes:
                     for is_call in [0, 1]: # 0=Put, 1=Call
                         iv = 0.3
                         price, delta, gamma, vega, theta, rho = black_scholes(spot, strike, T, 0.04, iv, is_call)
-                        
+
                         if price < 0.01: continue
 
-                        # Column format matching the expected options schema and the DataManager SQL query
+                        # Column format matching your provided snippet AND the DataManager SQL query
                         opt_data = {
                             "QUOTE_DATE": current_date.strftime("%Y-%m-%d"),
                             "option_id": f"{is_call}_{strike:.2f}_{expire_date.strftime('%Y-%m-%d')}",
@@ -138,10 +138,10 @@ def generate_options_db(dates):
         db_path = os.path.join(DATA_DIR, f"{ticker.lower()}_options.db")
         conn = sqlite3.connect(db_path)
         df_opt = pd.DataFrame(all_options)
-        
+
         # Important: DataManager expects specific column types, especially dates
         df_opt.to_sql("options", conn, if_exists="replace", index=False)
-        
+
         # Create index for speed (DataManager queries by QUOTE_DATE)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_date ON options (QUOTE_DATE)")
         conn.close()
@@ -150,7 +150,7 @@ def generate_options_db(dates):
 # --- 3. Generate Auxiliary Data (Earnings, CPI) ---
 def generate_aux_data(dates):
     print("Generating Auxiliary CSVs...")
-    
+
     # Earnings.csv
     # Structure based on core/market_analyzer.py: Date, aapl, tsla, nvda (days to next), growth columns
     earnings_data = []
@@ -162,7 +162,7 @@ def generate_aux_data(dates):
             row[f"{t}_revenue_growth"] = np.random.uniform(0.05, 0.20)
         earnings_data.append(row)
     pd.DataFrame(earnings_data).to_csv(os.path.join(DATA_DIR, "earnings.csv"), index=False)
-    
+
     # CPI.csv
     # Structure: date, inflation, forecast, actual_state, last_release_date, next_release_date, days_until...
     cpi_data = []
@@ -177,7 +177,7 @@ def generate_aux_data(dates):
             "days_until_next_release": 15
         })
     pd.DataFrame(cpi_data).to_csv(os.path.join(DATA_DIR, "cpi.csv"), index=False)
-    
+
     # VIX.csv (Used in market_analyzer)
     vix_data = []
     for d in dates:
@@ -186,7 +186,7 @@ def generate_aux_data(dates):
             "Open": 20, "High": 22, "Low": 18, "Close": 19 + np.random.normal(0, 1)
         })
     pd.DataFrame(vix_data).to_csv(os.path.join(DATA_DIR, "vix.csv"), index=False)
-    
+
     # Fear Greed
     fg_data = []
     for d in dates:
@@ -195,7 +195,7 @@ def generate_aux_data(dates):
             "Fear Greed": np.random.randint(20, 80)
         })
     pd.DataFrame(fg_data).to_csv(os.path.join(DATA_DIR, "fear-greed-2011-2023.csv"), index=False)
-    
+
     print("  Saved earnings.csv, cpi.csv, vix.csv, fear-greed.csv")
 
 if __name__ == "__main__":

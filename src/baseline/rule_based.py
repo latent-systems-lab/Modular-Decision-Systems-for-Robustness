@@ -1,4 +1,4 @@
-# Rule-based baseline backtests.
+# strategy_backtests.py
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -8,14 +8,14 @@ import matplotlib.pyplot as plt
 # SETTINGS
 # ----------------------------------
 TICKERS          = ["AAPL", "NVDA", "TSLA"]
-DATA_START       = "2021-01-01"       
+DATA_START       = "2021-01-01"
 DATA_END         = "2023-12-31"
 BACKTEST_START   = pd.Timestamp("2021-01-01")
 INITIAL_CAPITAL  = 1_000_000
-REB_FREQ         = "MS"                
-LOOKBACK_MV      = 60                  
-LOOKBACK_ZMR     = 21                  
-LOOKBACK_TSM     = 252                 
+REB_FREQ         = "MS"
+LOOKBACK_MV      = 60
+LOOKBACK_ZMR     = 21
+LOOKBACK_TSM     = 252
 OUT_BASE         = Path("results/baseline/rule-based2")
 
 # ----------------------------------

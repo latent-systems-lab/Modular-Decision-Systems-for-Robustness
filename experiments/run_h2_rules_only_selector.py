@@ -27,6 +27,7 @@ def build_h2_config() -> ExtendedSimulationConfig:
         hedging_strategies=config.HEDGING_STRATEGIES,
         use_llm=True,
         use_memory_rl=False,
+        equal_options_strategy_split=False,
         rule_based_strategy_split=False,
     )
 

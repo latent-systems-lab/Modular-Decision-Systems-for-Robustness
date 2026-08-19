@@ -1,5 +1,5 @@
 """
-Coordinator for the portfolio risk-management simulation system.
+Coordinator for the hedge fund simulation system.
 Orchestrates the entire simulation process and manages interactions between components.
 Includes integration with memory-based reinforcement learning.
 """
@@ -21,6 +21,7 @@ from src.models.pydantic_models import (
     PortfolioAllocation,
     SimulationResult,
     HedgingStrategy,
+    HedgingStrategies,
 )
 from src.core.data_manager import DataManager
 from src.core.market_analyzer import MarketAnalyzer
@@ -34,6 +35,9 @@ from src.memory_rl.llm_client import LLMClient
 
 
 logger = logging.getLogger(__name__)
+DEFAULT_MAX_CASH_RESERVE_RATIO = 0.02
+DEFAULT_MAX_OPTIONS_ALLOCATION_RATIO = 0.10
+DEFAULT_MAX_COLLAR_OPTIONS_WEIGHT = 0.05
 if not logger.handlers:
     handler = logging.StreamHandler()
     formatter = logging.Formatter(
@@ -49,7 +53,7 @@ class Coordinator:
     Coordinates the simulation process and manages interactions between components.
     """
 
-    def __init__(self, config: SimulationConfig):
+    def __init__(self, config: SimulationConfig, data_provider: Optional[Any] = None):
         """
         Initialize the Coordinator.
 
@@ -60,10 +64,10 @@ class Coordinator:
         self.data_dir = "data"
 
         # Initialize components
-        self.data_manager = DataManager(self.data_dir)
+        self.data_manager = data_provider if data_provider is not None else DataManager(self.data_dir)
         self.market_analyzer = MarketAnalyzer(self.data_manager)
         self.portfolio_manager = PortfolioManager(
-            self.data_manager, config.initial_capital
+            self.data_manager, config.initial_capital, config_obj=config
         )
         self.asset_manager = AssetManager(self.data_manager)
         self.performance_tracker = PerformanceTracker(
@@ -98,6 +102,17 @@ class Coordinator:
         self.emergency_rebalance_triggered = False
         self.emergency_rebalance_drawndown = None
 
+    def _controller_mode(self) -> str:
+        return getattr(self.config, "controller_mode", "full_llm")
+
+    def _memory_enabled_for_controller(self) -> bool:
+        return self._controller_mode() in {"full_llm", "retrieval_only", "random_retrieval"} and bool(
+            getattr(self.config, "use_memory_rl", False)
+        )
+
+    def _controller_uses_llm(self) -> bool:
+        return self._controller_mode() in {"full_llm", "random_retrieval"}
+
     def _get_llm_client(self) -> Any:
         """
         Get LLM client for memory-based RL.
@@ -106,6 +121,161 @@ class Coordinator:
             LLM client instance.
         """
         return LLMClient()
+
+    def _normalize_portfolio_allocation_cash(
+        self,
+        allocation: PortfolioAllocation,
+        max_cash_ratio: float = DEFAULT_MAX_CASH_RESERVE_RATIO,
+    ) -> PortfolioAllocation:
+        total_capital = float(allocation.total_capital or self.portfolio_manager.cash)
+        if total_capital <= 0.0 or not allocation.allocations:
+            return allocation
+
+        max_cash = total_capital * max_cash_ratio
+        target_deployable = max(0.0, total_capital - max_cash)
+        current_allocated = sum(max(0.0, float(item.amount)) for item in allocation.allocations)
+        if current_allocated <= 0.0:
+            return allocation
+
+        current_cash = max(0.0, total_capital - current_allocated)
+        if current_cash <= max_cash:
+            return allocation
+
+        scale = target_deployable / current_allocated
+        normalized_allocations = []
+        for item in allocation.allocations:
+            amount = max(0.0, float(item.amount)) * scale
+            normalized_allocations.append(
+                CapitalAllocation(
+                    asset=item.asset,
+                    amount=amount,
+                    percentage=amount / total_capital,
+                    action=item.action,
+                    rationale=getattr(item, "rationale", None),
+                )
+            )
+
+        logger.info(
+            "Capping cash reserve from %.2f%% to %.2f%% and scaling allocations by %.4f",
+            (current_cash / total_capital) * 100.0,
+            max_cash_ratio * 100.0,
+            scale,
+        )
+        return PortfolioAllocation(
+            total_capital=total_capital,
+            allocations=normalized_allocations,
+            cash_reserve=max_cash,
+            allocation_date=getattr(allocation, "allocation_date", None),
+            rationale=(
+                f"{allocation.rationale} Cash reserve capped at {max_cash_ratio:.0%} "
+                "for normal experiment conditions."
+            ),
+        )
+
+    def _normalize_asset_split(
+        self,
+        asset_split: AssetSplit,
+        allocation_amount: float,
+        max_options_ratio: Optional[float] = None,
+    ) -> AssetSplit:
+        if allocation_amount <= 0.0:
+            return asset_split
+
+        if max_options_ratio is None:
+            max_options_ratio = float(
+                getattr(
+                    self.config,
+                    "max_options_allocation_ratio",
+                    DEFAULT_MAX_OPTIONS_ALLOCATION_RATIO,
+                )
+            )
+
+        options_amount = max(0.0, min(float(asset_split.options_amount), allocation_amount))
+        max_options_amount = allocation_amount * max_options_ratio
+        if options_amount > max_options_amount:
+            logger.info(
+                "Capping options allocation for %s from %.2f%% to %.2f%%",
+                asset_split.asset,
+                (options_amount / allocation_amount) * 100.0,
+                max_options_ratio * 100.0,
+            )
+            options_amount = max_options_amount
+
+        stock_amount = allocation_amount - options_amount
+        hedging_strategies = self._normalize_hedging_strategy_weights(
+            asset_split.hedging_strategies
+        )
+        stocks_action = asset_split.stocks_action
+        if stocks_action == "sell" and not getattr(
+            self.config, "allow_short_selling", False
+        ):
+            logger.info(
+                "Short selling disabled; converting %s stock action from sell to buy",
+                asset_split.asset,
+            )
+            stocks_action = "buy"
+        return AssetSplit(
+            asset=asset_split.asset,
+            total_allocation=allocation_amount,
+            stock_percentage=stock_amount / allocation_amount,
+            stocks_action=stocks_action,
+            options_percentage=options_amount / allocation_amount,
+            stock_amount=stock_amount,
+            options_amount=options_amount,
+            rationale=asset_split.rationale,
+            hedging_strategies=hedging_strategies,
+        )
+
+    def _normalize_hedging_strategy_weights(self, hedging_strategies):
+        max_collar_weight = float(
+            getattr(
+                self.config,
+                "max_collar_options_weight",
+                DEFAULT_MAX_COLLAR_OPTIONS_WEIGHT,
+            )
+        )
+        if isinstance(hedging_strategies, dict):
+            weights = {
+                "collar": float(hedging_strategies.get("collar", 0.0) or 0.0),
+                "straddle": float(hedging_strategies.get("straddle", 0.0) or 0.0),
+                "delta_neutral": float(
+                    hedging_strategies.get("delta_neutral", 0.0)
+                    or hedging_strategies.get("delta-neutral", 0.0)
+                    or 0.0
+                ),
+            }
+        else:
+            weights = {
+                "collar": float(getattr(hedging_strategies, "collar", 0.0) or 0.0),
+                "straddle": float(getattr(hedging_strategies, "straddle", 0.0) or 0.0),
+                "delta_neutral": float(
+                    getattr(hedging_strategies, "delta_neutral", 0.0) or 0.0
+                ),
+            }
+
+        total = sum(max(0.0, value) for value in weights.values())
+        if total <= 0.0:
+            weights = {"collar": 0.0, "straddle": 0.5, "delta_neutral": 0.5}
+        else:
+            weights = {key: max(0.0, value) / total for key, value in weights.items()}
+
+        if weights["collar"] > max_collar_weight:
+            excess = weights["collar"] - max_collar_weight
+            weights["collar"] = max_collar_weight
+            other_total = weights["straddle"] + weights["delta_neutral"]
+            if other_total > 0.0:
+                weights["straddle"] += excess * (weights["straddle"] / other_total)
+                weights["delta_neutral"] += excess * (
+                    weights["delta_neutral"] / other_total
+                )
+            else:
+                weights["straddle"] += excess / 2.0
+                weights["delta_neutral"] += excess / 2.0
+
+        total = sum(weights.values())
+        if total > 0.0:
+            weights = {key: value / total for key, value in weights.items()}
+        return HedgingStrategies(**weights)
 
     def run_simulation(self) -> SimulationResult:
         """
@@ -142,7 +312,10 @@ class Coordinator:
                     self.current_date += timedelta(days=1)
                     continue
 
-            logger.info("Processing date: %s", self.current_date)
+            # === TRADING DAY SEPARATOR ===
+            logger.info("="*90)
+            logger.info(f"{'TRADING DAY':<40} {self.current_date} {'='*30}")
+            logger.info("="*90)
 
             # Run single day simulation
             self.run_single_day(self.current_date)
@@ -286,11 +459,7 @@ class Coordinator:
         self.market_analysis = market_analysis
 
         # Step 2 & 3 Combined: Get allocation and split
-        if (
-            self.memory_rl
-            and hasattr(self.config, "use_memory_rl")
-            and self.config.use_memory_rl
-        ):
+        if self.memory_rl and self._memory_enabled_for_controller():
             # Use memory-based RL for allocation and split
             allocation, asset_splits = self._get_memory_rl_allocation_and_split(
                 self.config.assets, market_analysis, self.current_date
@@ -300,6 +469,8 @@ class Coordinator:
             allocation, asset_splits = self.allocate_and_split_combined(
                 self.config.assets, market_analysis, self.current_date
             )
+
+        allocation = self._normalize_portfolio_allocation_cash(allocation)
 
         # Create stock-only allocations based on the splits
         stock_allocations = []
@@ -312,6 +483,8 @@ class Coordinator:
             asset_split = asset_splits.get(ticker)
             if not asset_split:
                 continue
+            asset_split = self._normalize_asset_split(asset_split, asset_allocation.amount)
+            asset_splits[ticker] = asset_split
 
             # Create stock allocation
             stock_allocation = CapitalAllocation(
@@ -337,8 +510,12 @@ class Coordinator:
         )
 
         # Apply hedging strategies for options portion
+        equal_split = getattr(self.config, "equal_options_strategy_split", False)
         rule_based_split = getattr(self.config, "rule_based_strategy_split", False)
         num_strategies = len(self.config.hedging_strategies)
+        equal_factor = (
+            (1.0 / num_strategies) if equal_split and num_strategies > 0 else None
+        )
 
         for ticker, asset_split in asset_splits.items():
             # Skip if options allocation is too small or no stock position exists
@@ -365,27 +542,39 @@ class Coordinator:
             else:
                 # Build options_allocations using the strategies defined in config.
                 options_allocations = {}
+                strategy_factors = {}
                 for strat in self.config.hedging_strategies:
                     normalized = strat.lower().replace("-", "_").replace(" ", "_")
-                    if isinstance(asset_split.hedging_strategies, dict):
+                    if equal_factor is not None:
+                        factor = equal_factor
+                    elif isinstance(asset_split.hedging_strategies, dict):
                         factor = asset_split.hedging_strategies.get(normalized, 0.0)
                     else:
                         # Otherwise assume it's an object with attributes
                         factor = getattr(
                             asset_split.hedging_strategies, normalized, 0.0
                         )
-                    if factor == 0.0 and num_strategies == 1:
+                    if factor == 0.0 and num_strategies == 1 and equal_factor is None:
                         factor = 1.0
-                    options_allocations[normalized] = (
-                        asset_split.options_amount * factor
-                    )
+                    strategy_factors[normalized] = factor
+
+                if (
+                    asset_split.options_amount > 0.0
+                    and num_strategies > 0
+                    and sum(strategy_factors.values()) <= 0.0
+                ):
+                    strategy_factors = {
+                        strat.lower().replace("-", "_").replace(" ", "_"): 1.0 / num_strategies
+                        for strat in self.config.hedging_strategies
+                    }
+
+                options_allocations = {
+                    strategy: asset_split.options_amount * factor
+                    for strategy, factor in strategy_factors.items()
+                }
 
                 # Use memory-based RL for hedging strategies if enabled
-                if (
-                    self.memory_rl
-                    and hasattr(self.config, "use_memory_rl")
-                    and self.config.use_memory_rl
-                ):
+                if self.memory_rl and self._memory_enabled_for_controller() and self._controller_uses_llm():
                     hedging_strategy = self._get_memory_rl_hedging_strategy(
                         ticker,
                         self.portfolio_manager.stock_positions[ticker].dict(),
@@ -404,7 +593,7 @@ class Coordinator:
                                 market_analysis[ticker],
                                 self.current_date,
                                 strategy_type=self.config.hedging_strategies,
-                                use_llm=self.config.use_llm,
+                                use_llm=self._controller_uses_llm(),
                             )
                         )
                     except Exception as e:
@@ -414,15 +603,19 @@ class Coordinator:
                         continue
 
             logger.info(
-                "Options for %s: allocated $%.2f, using $%.2f",
+                "Options for %s: allocated $%.2f, using $%.2f | %d option positions",
                 ticker,
                 asset_split.options_amount,
                 sum(op.paid_amount for op in hedging_strategy.option_positions),
+                len(hedging_strategy.option_positions),
             )
 
             # Add option positions to portfolio
-            for option_position in hedging_strategy.option_positions:
+            for i, option_position in enumerate(hedging_strategy.option_positions):
                 try:
+                    logger.debug(
+                        f"  [{i+1}/{len(hedging_strategy.option_positions)}] Executing {option_position.option_type} {option_position.option_id} | {option_position.contracts} contracts"
+                    )
                     self.portfolio_manager.execute_option_trade(
                         option_position, self.current_date
                     )
@@ -474,6 +667,7 @@ class Coordinator:
                 market_analysis=market_analysis,
                 current_positions=current_positions,
                 emergency=self.emergency_rebalance_drawndown,
+                controller_mode=self._controller_mode(),
             )
         )
 
@@ -494,6 +688,7 @@ class Coordinator:
                 or 0.0,
                 volatility=self._get_asset_volatility(ticker, current_date),
                 hedging_strategies=self.config.hedging_strategies,
+                controller_mode=self._controller_mode(),
             )
 
             asset_splits[ticker] = asset_split
@@ -594,6 +789,7 @@ class Coordinator:
                 available_options=prefiltered_options,
                 available_capital=allocation,
                 market_analysis=market_analysis.model_dump(),
+                controller_mode=self._controller_mode(),
             )
 
             if result is not None:
@@ -700,16 +896,16 @@ class Coordinator:
         )
         slippage_cost = (
             turnover
-            * 0.0002  # 2 bps per unit turnover
+            * (getattr(self.config, "slippage_bps", 2.0) / 10_000.0)
             * post_rebalance_portfolio.total_value
         )
 
         option_turnover_value = self._calculate_option_turnover_value(
             pre_rebalance_portfolio, post_rebalance_portfolio
         )
-        option_transaction_cost = (
-            option_turnover_value * 0.002
-        )  # 20 bps on option turnover
+        option_transaction_cost = option_turnover_value * (
+            getattr(self.config, "options_transaction_cost_bps", 20.0) / 10_000.0
+        )
 
         transaction_costs = slippage_cost + option_transaction_cost
 
@@ -867,7 +1063,10 @@ class Coordinator:
                 asset_total_value = post_position.market_value + post_options_value
                 option_costs = 0.0
                 if asset_total_value > 0:
-                    option_costs = (0.002 * option_turnover_value) / asset_total_value
+                    option_costs = (
+                        (getattr(self.config, "options_transaction_cost_bps", 20.0) / 10_000.0)
+                        * option_turnover_value
+                    ) / asset_total_value
 
                 # Calculate volatility metrics (simplified)
                 combined_volatility = (
@@ -1060,6 +1259,22 @@ class Coordinator:
                 "average_price": position.average_price,
                 "market_value": position.market_value,
             }
+
+        if self._controller_mode() == "no_memory":
+            portfolio_allocation = self.portfolio_manager.allocate_capital(
+                assets=assets,
+                market_analysis=market_analysis,
+                current_date=current_date,
+                use_llm=False,
+            )
+            asset_splits = {}
+            for alloc in portfolio_allocation.allocations:
+                asset_splits[alloc.asset] = self.asset_manager._rule_based_split(
+                    ticker=alloc.asset,
+                    allocation_amount=alloc.amount,
+                    market_analysis=market_analysis[alloc.asset],
+                )
+            return portfolio_allocation, asset_splits
 
         # Build combined prompt
         prompt = build_combined_allocation_split_prompt(

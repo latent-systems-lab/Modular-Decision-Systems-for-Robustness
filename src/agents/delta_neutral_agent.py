@@ -92,6 +92,7 @@ class DeltaNeutralAgent(HedgingAgent):
                     ticker=ticker,
                     available_capital=available_capital,
                     current_date=current_date,
+                    stock_position=stock_position,
                 )
                 return options
             else:
@@ -187,21 +188,29 @@ class DeltaNeutralAgent(HedgingAgent):
         neg_delta = negative_delta_option.get("delta", -0.5)
 
         # Compute required contracts to offset delta.
+        # Key constraint: contracts should match the hedge ratio (shares / 100 per contract)
+        # to avoid over-leveraging the hedge.
+        max_hedge_contracts = max(1, int(abs(stock_delta) / 100) + 1)
+
         if stock_delta > 0:
             put_contracts_needed = int(stock_delta / (abs(neg_delta) * 100)) + 1
+            # Cap to reasonable hedge ratio to prevent over-leverage
+            put_contracts_needed = min(put_contracts_needed, max_hedge_contracts)
             remaining_delta = stock_delta + (neg_delta * put_contracts_needed * 100)
             call_contracts_needed = 0
             if remaining_delta < 0:
                 call_contracts_needed = min(
-                    5, int(abs(remaining_delta) / (pos_delta * 100)) + 1
+                    max_hedge_contracts, int(abs(remaining_delta) / (pos_delta * 100)) + 1
                 )
         else:
             call_contracts_needed = int(abs(stock_delta) / (pos_delta * 100)) + 1
+            # Cap to reasonable hedge ratio to prevent over-leverage
+            call_contracts_needed = min(call_contracts_needed, max_hedge_contracts)
             remaining_delta = stock_delta + (pos_delta * call_contracts_needed * 100)
             put_contracts_needed = 0
             if remaining_delta > 0:
                 put_contracts_needed = min(
-                    5, int(remaining_delta / (abs(neg_delta) * 100)) + 1
+                    max_hedge_contracts, int(remaining_delta / (abs(neg_delta) * 100)) + 1
                 )
 
         # Compute tentative total cost.
@@ -356,10 +365,10 @@ class DeltaNeutralAgent(HedgingAgent):
             Formatted prompt string.
         """
         prompt = f"""
-        You are a portfolio options strategist. Design a delta-neutral hedging strategy for the following position:
-        
+        You are a hedge fund options strategist. Design a delta-neutral hedging strategy for the following position:
+
         Asset: {ticker}
-        Current Position: {stock_position.get('shares', 0)} shares at ${stock_position.get('average_price', 0):.2f} 
+        Current Position: {stock_position.get('shares', 0)} shares at ${stock_position.get('average_price', 0):.2f}
         (Market Value: ${stock_position.get('market_value', 0):,.2f})
         Current Price: ${stock_position.get('current_price', 0):.2f}
         Available Capital for Options: ${available_capital:,.2f} - you can use all of it, but do not exceed this capital.
@@ -376,7 +385,7 @@ class DeltaNeutralAgent(HedgingAgent):
         - Sentiment Score: {market_analysis.get('sentiment', 0.0):.2f} ({market_analysis.get('sentiment_label', 'neutral')})
         - Outlook Score: {market_analysis.get('outlook', 0.0):.2f} ({market_analysis.get('outlook_label', 'balanced')})
         - Short-term Outlook: {market_analysis.get('short_term_outlook', 'stable')}
-        
+
         Available Options:
         """
 
@@ -393,7 +402,7 @@ class DeltaNeutralAgent(HedgingAgent):
         # Add strategy-specific instructions
         prompt += f"""
         {strategy_description}
-        
+
         Your response should be a JSON object with the following structure:
         {{
             "asset": "{ticker}",
@@ -409,7 +418,7 @@ class DeltaNeutralAgent(HedgingAgent):
             "estimated_cost": total_cost_estimate,
             "rationale": "Explain your rationale for the recommended strategy, including how you determined the number of contracts."
         }}
-        
+
         IMPORTANT: Use only option_ids from the available options list above.
         """
         return prompt
@@ -445,17 +454,17 @@ class DeltaNeutralAgent(HedgingAgent):
         outlook = market_analysis.get("short_term_outlook", "stable")
 
         prompt = f"""
-    You are an advanced portfolio options strategist. 
-    Your goal is to design an 'adjusted delta' strategy for the following stock position, 
-    meaning the final net delta (stock delta + any option deltas) can be positive, negative, or near zero, 
+    You are an advanced hedge fund options strategist.
+    Your goal is to design an 'adjusted delta' strategy for the following stock position,
+    meaning the final net delta (stock delta + any option deltas) can be positive, negative, or near zero,
     depending on how you interpret the current market analysis:
 
     Asset: {ticker}
-    Current Stock Position: {stock_position.get('shares', 0)} shares at ${stock_position.get('average_price', 0):.2f} 
+    Current Stock Position: {stock_position.get('shares', 0)} shares at ${stock_position.get('average_price', 0):.2f}
                         (Market Value: ${stock_position.get('market_value', 0):,.2f})
     Current Stock Price: ${stock_position.get('current_price', 0):.2f}
 
-    Available Capital for Options: ${available_capital:,.2f} 
+    Available Capital for Options: ${available_capital:,.2f}
     (Do not exceed this amount in total premium or margin requirements.)
 
     Market Analysis:
@@ -463,11 +472,11 @@ class DeltaNeutralAgent(HedgingAgent):
     - Sentiment: {sentiment_label} (score {sentiment_score:.2f})
     - Short-term Outlook: {outlook} (score {outlook_score:.2f})
 
-    You can select any number of option contracts (calls or puts, buy or sell) from the list below. 
-    You may choose to buy calls if you want to increase net delta, or buy puts / sell calls to reduce it, or do nothing at all. 
+    You can select any number of option contracts (calls or puts, buy or sell) from the list below.
+    You may choose to buy calls if you want to increase net delta, or buy puts / sell calls to reduce it, or do nothing at all.
     Remember:
     - 1 option contract = 100 shares.
-    - If an option's ask price is $X, the cost per contract is 100 * X. 
+    - If an option's ask price is $X, the cost per contract is 100 * X.
     - Your total option costs must not exceed ${available_capital:,.2f}.
 
     ## Guidance:
@@ -493,8 +502,8 @@ class DeltaNeutralAgent(HedgingAgent):
 
         # Instructions for the final JSON structure:
         prompt += f"""
-    Now design an 'adjusted delta' strategy that can have net delta positive, negative, or near zero, 
-    depending on how you interpret the above market analysis. 
+    Now design an 'adjusted delta' strategy that can have net delta positive, negative, or near zero,
+    depending on how you interpret the above market analysis.
     Address these points:
     1. Which options (if any) to trade (buy or sell, calls or puts).
     2. The number of contracts.
@@ -503,8 +512,8 @@ class DeltaNeutralAgent(HedgingAgent):
     5. The rationale for why you chose that net delta stance (e.g., bullish, bearish, or partial hedge).
 
     IMPORTANT:
-    - Do NOT always force net delta = 0. 
-    - If you believe a bullish scenario is likely, net delta could be substantially positive (the stock alone is already positive). 
+    - Do NOT always force net delta = 0.
+    - If you believe a bullish scenario is likely, net delta could be substantially positive (the stock alone is already positive).
     - If you believe a bearish scenario is likely, net delta could be partially or fully negative.
     - If neutral, near zero delta is fine.
     - Provide a short rationale describing your reasoning in context of the market outlook.

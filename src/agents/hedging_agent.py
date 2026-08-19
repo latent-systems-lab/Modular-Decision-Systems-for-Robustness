@@ -1,5 +1,5 @@
 """
-Hedging Agent for the portfolio risk-management simulation system.
+Hedging Agent for the hedge fund simulation system.
 Abstract class for all hedging agents.
 """
 
@@ -135,21 +135,21 @@ class HedgingAgent(BaseAgent):
             Formatted prompt string.
         """
         prompt = f"""
-        You are a portfolio options strategist. Design a {self.strategy_type} hedging strategy for the following position:
-        
+        You are a hedge fund options strategist. Design a {self.strategy_type} hedging strategy for the following position:
+
         Asset: {ticker}
         Current Position: {stock_position.get('shares', 0)} shares at ${stock_position.get('average_price', 0):.2f} (Market Value: ${stock_position.get('market_value', 0):,.2f})
         Current Price: ${stock_position.get('current_price', 0):.2f}
 
         You have ${available_capital:,.2f} to allocate to this options strategy.
         Given this substantial capital, recommend an appropriate number of contracts (try to use all of it).
-        
+
         Market Analysis:
         - Regime: {market_analysis.get('regime', 'neutral')}
         - Sentiment Score: {market_analysis.get('sentiment', 0.0):.2f} ({market_analysis.get('sentiment_label', 'neutral')})
         - Outlook Score: {market_analysis.get('outlook', 0.0):.2f} ({market_analysis.get('outlook_label', 'balanced')})
         - Short-term Outlook: {market_analysis.get('short_term_outlook', 'stable')}
-        
+
         Available Options:
         """
         # Add available options data (limit to 10 to keep prompt size reasonable)
@@ -173,7 +173,7 @@ class HedgingAgent(BaseAgent):
         # Add strategy-specific instructions
         prompt += f"""
         {strategy_description}
-        
+
         For your recommended strategy, provide:
         1. Specific option contracts to use (strike, expiration, type)
         2. Number of contracts

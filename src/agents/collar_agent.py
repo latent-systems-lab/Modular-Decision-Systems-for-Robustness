@@ -381,7 +381,7 @@ class CollarAgent(HedgingAgent):
         call_upper_pct = abs((call_upper_ratio - 1) * 100)
 
         prompt = f"""
-        You are a portfolio options strategist. Design a collar hedging strategy for the following position:
+        You are a hedge fund options strategist. Design a collar hedging strategy for the following position:
 
         Asset: {ticker}
         Current Position: {stock_position.get('shares', 0)} shares at ${stock_position.get('average_price', 0):.2f} (Market Value: ${stock_position.get('market_value', 0):,.2f})
@@ -394,15 +394,15 @@ class CollarAgent(HedgingAgent):
         The strikes should be balanced (ideally equidistant from the current price) so that the call premium partially or fully offsets the cost of the put.
         Use options with {min_dte}-{max_dte} days to expiration.
         Remember that each contract represents 100 shares; calculate the cost per contract and ensure that the total cost does not exceed the available capital.
-        
+
         Market Analysis:
         - Regime: {market_analysis.get('regime', 'neutral')}
         - Sentiment Score: {market_analysis.get('sentiment', 0.0):.2f} ({market_analysis.get('sentiment_label', 'neutral')})
         - Outlook Score: {market_analysis.get('outlook', 0.0):.2f} ({market_analysis.get('outlook_label', 'balanced')})
         - Short-term Outlook: {market_analysis.get('short_term_outlook', 'stable')}
-        
+
         {strategy_description}
-        
+
         Your response should be a JSON object with the following structure:
         {{
             "asset": "{ticker}",
@@ -424,7 +424,7 @@ class CollarAgent(HedgingAgent):
             "estimated_cost": total_cost_estimate,
             "rationale": "Explain your rationale for the recommended strategy, including how you determined the option strikes and the number of contracts."
         }}
-        
+
         IMPORTANT: Use only option_ids from the available options list above. Be reasonable in your selections and quantities.
         """
         return prompt
@@ -454,7 +454,7 @@ class CollarAgent(HedgingAgent):
         """
         market_analysis = market_analysis.dict()
         prompt = f"""
-    You are an experienced portfolio options strategist tasked with designing a collar hedging strategy for the asset "{ticker}".
+    You are an experienced hedge fund options strategist tasked with designing a collar hedging strategy for the asset "{ticker}".
 
     Position Details:
     - Shares: {stock_position.get('shares', 0)}

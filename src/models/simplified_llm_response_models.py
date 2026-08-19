@@ -1,5 +1,5 @@
 """
-Simplified Pydantic models for LLM responses in the portfolio risk-management simulation system.
+Simplified Pydantic models for LLM responses in the hedge fund simulation system.
 These models define the structure of data expected from LLM API calls.
 """
 

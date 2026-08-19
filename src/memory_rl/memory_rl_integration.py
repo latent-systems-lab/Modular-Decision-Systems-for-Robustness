@@ -7,6 +7,7 @@ import json
 import logging
 from typing import Dict, List, Optional, Union, Literal, Tuple, Any
 from datetime import date, datetime, timedelta
+import random
 from pydantic import BaseModel, Field
 
 from src.utils.option_lookup import convert_hedging_strategy_response
@@ -20,13 +21,16 @@ from src.models.simplified_llm_response_models import HedgingStrategyResponse
 
 # Import existing components (placeholders - replace with actual imports)
 from src.models.pydantic_models import (
-    OptionData, PortfolioAllocation, AssetSplit, HedgingStrategy, 
+    OptionData, PortfolioAllocation, AssetSplit, HedgingStrategy,
     MarketRegime, CapitalAllocation, HedgingStrategies, SimulationConfig
 )
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+ControllerMode = Literal["full_llm", "retrieval_only", "random_retrieval", "no_memory"]
+DEFAULT_CASH_RESERVE_RATIO = 0.02
 
 class MemoryRLConfig(BaseModel):
     """Configuration for memory-based RL integration."""
@@ -37,7 +41,9 @@ class MemoryRLConfig(BaseModel):
     enable_reflection: bool = True
     reflection_frequency: int = 5  # Generate reflection every N experiences
     save_frequency: int = 1  # Save memory to disk every N experiences
-    
+    random_seed: int = 42
+    allow_memory_updates: bool = True
+
     class Config:
         arbitrary_types_allowed = True
 
@@ -51,7 +57,7 @@ class MemoryRLIntegration:
     """
     Integration class for connecting memory-based RL components with the existing system.
     """
-    
+
     def __init__(
         self,
         llm_client: Any,
@@ -60,7 +66,7 @@ class MemoryRLIntegration:
     ):
         """
         Initialize the memory-based RL integration.
-        
+
         Args:
             llm_client: Client for LLM API.
             data_manager: Data manager for accessing market data.
@@ -69,13 +75,13 @@ class MemoryRLIntegration:
         self.llm_client = llm_client
         self.data_manager = data_manager
         self.config = config or MemoryRLConfig()
-        
+
         # Create memory directory if it doesn't exist
         os.makedirs(self.config.memory_dir, exist_ok=True)
-        
+
         # Initialize components
         self.prompt_templates = PromptTemplates(self.config.prompt_config)
-        
+
         self.hierarchical_memory = HierarchicalMemoryStructure(
             config=self.config.memory_config,
             llm_client=llm_client
@@ -88,15 +94,212 @@ class MemoryRLIntegration:
             reward_config=self.config.reward_config,
             prompt_templates=self.prompt_templates
         )
-        
+
         # Load memory from disk if available
         self.hierarchical_memory.load_from_disk()
-        
+
         # Counters for reflection and saving
         self.experience_counter = 0
-        
+        self._random = random.Random(self.config.random_seed)
+
         logger.info("Memory-based RL integration initialized.")
-    
+
+    def _get_portfolio_memory_context(
+        self,
+        current_state: Dict[str, Any],
+        market_regime: str,
+        assets: List[str],
+        controller_mode: ControllerMode,
+        num_experiences: int = 5,
+    ) -> Tuple[List[Any], List[Any]]:
+        if controller_mode == "random_retrieval":
+            return self.hierarchical_memory.get_portfolio_experiences_random(
+                current_state=current_state,
+                market_regime=market_regime,
+                assets=assets,
+                num_experiences=num_experiences,
+                include_temporal_patterns=True,
+                rng=self._random,
+            )
+        return self.hierarchical_memory.get_portfolio_experiences(
+            current_state=current_state,
+            market_regime=market_regime,
+            assets=assets,
+            num_experiences=num_experiences,
+            include_temporal_patterns=True,
+        )
+
+    def _get_asset_memory_context(
+        self,
+        asset: str,
+        current_state: Dict[str, Any],
+        market_regime: str,
+        controller_mode: ControllerMode,
+        num_experiences: int = 5,
+    ) -> Tuple[List[Any], List[Any]]:
+        if controller_mode == "random_retrieval":
+            return self.hierarchical_memory.get_asset_experiences_random(
+                asset=asset,
+                current_state=current_state,
+                market_regime=market_regime,
+                num_experiences=num_experiences,
+                include_temporal_patterns=True,
+                rng=self._random,
+            )
+        return self.hierarchical_memory.get_asset_experiences(
+            asset=asset,
+            current_state=current_state,
+            market_regime=market_regime,
+            num_experiences=num_experiences,
+            include_temporal_patterns=True,
+        )
+
+    def _get_hedging_memory_context(
+        self,
+        asset: str,
+        strategy_type: str,
+        current_state: Dict[str, Any],
+        market_regime: str,
+        controller_mode: ControllerMode,
+        num_experiences: int = 5,
+    ) -> Tuple[List[Any], List[Any]]:
+        if controller_mode == "random_retrieval":
+            return self.hierarchical_memory.get_hedging_experiences_random(
+                asset=asset,
+                strategy_type=strategy_type,
+                current_state=current_state,
+                market_regime=market_regime,
+                num_experiences=num_experiences,
+                include_temporal_patterns=True,
+                rng=self._random,
+            )
+        return self.hierarchical_memory.get_hedging_experiences(
+            asset=asset,
+            strategy_type=strategy_type,
+            current_state=current_state,
+            market_regime=market_regime,
+            num_experiences=num_experiences,
+            include_temporal_patterns=True,
+        )
+
+    def _build_retrieval_only_portfolio_allocation(
+        self,
+        experiences: List[Any],
+        assets: List[str],
+        portfolio_value: float,
+        cash: float,
+        controller_mode: ControllerMode,
+    ) -> PortfolioAllocation:
+        if not experiences:
+            return self._create_fallback_portfolio_allocation(assets, portfolio_value, cash)
+
+        avg_cash_ratio = 0.0
+        asset_weights = {asset: 0.0 for asset in assets}
+        for exp in experiences:
+            action = exp.action or {}
+            outcome = exp.outcome or {}
+            state_value = float(exp.state.get("portfolio_value", portfolio_value) or portfolio_value or 1.0)
+            cash_reserve = float(action.get("cash_reserve", 0.0) or 0.0)
+            avg_cash_ratio += max(0.0, min(1.0, cash_reserve / max(state_value, 1.0)))
+            for alloc in action.get("allocations", []):
+                ticker = alloc.get("asset")
+                if ticker in asset_weights:
+                    pct = float(alloc.get("percentage", 0.0) or 0.0)
+                    if pct <= 0.0:
+                        amt = float(alloc.get("amount", 0.0) or 0.0)
+                        pct = amt / max(state_value, 1.0)
+                    reward_scale = 1.0 + max(-0.5, min(0.5, float(outcome.get("reward", 0.0) or 0.0)))
+                    asset_weights[ticker] += max(0.0, pct) * reward_scale
+
+        avg_cash_ratio /= max(len(experiences), 1)
+        avg_cash_ratio = min(avg_cash_ratio, DEFAULT_CASH_RESERVE_RATIO)
+        deployable_ratio = max(0.0, min(1.0, 1.0 - avg_cash_ratio))
+        total_weight = sum(asset_weights.values())
+        if total_weight <= 0.0:
+            return self._create_fallback_portfolio_allocation(assets, portfolio_value, cash)
+
+        allocations = []
+        for asset in assets:
+            normalized = asset_weights[asset] / total_weight
+            amount = portfolio_value * deployable_ratio * normalized
+            allocations.append(
+                CapitalAllocation(
+                    asset=asset,
+                    amount=amount,
+                    percentage=normalized * deployable_ratio,
+                    action="buy",
+                )
+            )
+
+        return PortfolioAllocation(
+            total_capital=portfolio_value,
+            allocations=allocations,
+            cash_reserve=portfolio_value * avg_cash_ratio,
+            rationale=(
+                f"{controller_mode} controller: allocation aggregated directly from retrieved "
+                f"portfolio memories without LLM coordination; cash reserve capped at "
+                f"{DEFAULT_CASH_RESERVE_RATIO:.0%} for normal conditions."
+            ),
+        )
+
+    def _build_retrieval_only_asset_split(
+        self,
+        asset: str,
+        allocation_amount: float,
+        experiences: List[Any],
+        controller_mode: ControllerMode,
+    ) -> AssetSplit:
+        if not experiences:
+            return self._create_fallback_asset_split(asset, allocation_amount)
+
+        stock_pct = 0.0
+        options_pct = 0.0
+        strategy_weights: Dict[str, float] = {
+            "collar": 0.0,
+            "straddle": 0.0,
+            "delta_neutral": 0.0,
+        }
+
+        for exp in experiences:
+            action = exp.action or {}
+            stock_pct += float(action.get("stock_percentage", 0.0) or 0.0)
+            options_pct += float(action.get("options_percentage", 0.0) or 0.0)
+            for key, value in (action.get("hedging_strategies", {}) or {}).items():
+                normalized = key.lower().replace("-", "_").replace(" ", "_")
+                if normalized in strategy_weights:
+                    strategy_weights[normalized] += float(value or 0.0)
+
+        count = float(len(experiences))
+        stock_pct /= count
+        options_pct /= count
+        total = stock_pct + options_pct
+        if total <= 0.0:
+            stock_pct, options_pct = 0.7, 0.3
+        else:
+            stock_pct /= total
+            options_pct /= total
+
+        strategy_total = sum(strategy_weights.values())
+        if strategy_total <= 0.0:
+            strategy_weights = {"collar": 1.0 / 3.0, "straddle": 1.0 / 3.0, "delta_neutral": 1.0 / 3.0}
+        else:
+            strategy_weights = {k: v / strategy_total for k, v in strategy_weights.items()}
+
+        return AssetSplit(
+            asset=asset,
+            total_allocation=allocation_amount,
+            stock_percentage=stock_pct,
+            stocks_action="buy",
+            options_percentage=options_pct,
+            stock_amount=allocation_amount * stock_pct,
+            options_amount=allocation_amount * options_pct,
+            rationale=(
+                f"{controller_mode} controller: stock/options split aggregated directly "
+                f"from retrieved asset memories without LLM coordination."
+            ),
+            hedging_strategies=HedgingStrategies(**strategy_weights),
+        )
+
     def get_portfolio_allocation(
         self,
         current_date: date,
@@ -105,11 +308,12 @@ class MemoryRLIntegration:
         assets: List[str],
         market_analysis: Dict[str, MarketRegime],
         current_positions: Dict[str, Dict[str, Any]],
-        emergency: float = None
+        emergency: float = None,
+        controller_mode: ControllerMode = "full_llm",
     ) -> Tuple[PortfolioAllocation, Dict[str, Any]]:
         """
         Get portfolio allocation using memory-based RL.
-        
+
         Args:
             current_date: Current date.
             portfolio_value: Current portfolio value.
@@ -117,7 +321,7 @@ class MemoryRLIntegration:
             assets: List of assets.
             market_analysis: Market analysis for each asset.
             current_positions: Current positions.
-            
+
         Returns:
             Tuple of (portfolio allocation, decision details).
         """
@@ -130,30 +334,46 @@ class MemoryRLIntegration:
             "market_regimes": {asset: analysis.model_dump().get("regime", "neutral") for asset, analysis in market_analysis.items()},
             "current_positions": current_positions
         }
-        
+
         # Determine market regime (simplified - use most common regime)
         regimes = [analysis.model_dump().get("regime", "neutral") for analysis in market_analysis.values()]
         market_regime = max(set(regimes), key=regimes.count)
         try:
-            experiences, patterns = self.hierarchical_memory.get_portfolio_experiences(
+            experiences, patterns = self._get_portfolio_memory_context(
                 current_state=current_state,
                 market_regime=market_regime,
                 assets=assets,
                 num_experiences=5,
-                include_temporal_patterns=True
+                controller_mode=controller_mode,
             )
         except Exception as e:
             logger.error(f"Error retrieving portfolio experiences: {str(e)}")
             experiences = []
             patterns = []
-        
+
         # Create additional context with temporal patterns
         additional_context = ""
         if patterns:
             additional_context += "Temporal Patterns:\n"
             for i, pattern in enumerate(patterns):
                 additional_context += f"Pattern {i+1}:\n{pattern.to_text()}\n"
-        
+
+        if controller_mode == "retrieval_only":
+            allocation = self._build_retrieval_only_portfolio_allocation(
+                experiences=experiences,
+                assets=assets,
+                portfolio_value=portfolio_value,
+                cash=cash,
+                controller_mode=controller_mode,
+            )
+            return allocation, {
+                "source": controller_mode,
+                "confidence": 0.8 if experiences else 0.5,
+                "rationale": allocation.rationale,
+                "experiences_used": [exp.id for exp in experiences],
+                "patterns_used": [pattern.id for pattern in patterns],
+            }
+
         # Create prompt
         prompt = self.prompt_templates.create_portfolio_prompt(
             current_date=current_date,
@@ -166,14 +386,14 @@ class MemoryRLIntegration:
             emergency=emergency,
             additional_context=additional_context
         )
-        
+
         # Generate allocation using LLM
         try:
             response = self.llm_client.generate_text(prompt, PortfolioAllocation)
-            
+
             # Parse JSON response
             allocation_dict = response.model_dump()
-            
+
             # Create decision details
             decision_details = {
                 "source": "memory_rl",
@@ -182,24 +402,24 @@ class MemoryRLIntegration:
                 "experiences_used": [exp.id for exp in experiences],
                 "patterns_used": [pattern.id for pattern in patterns]
             }
-            
+
             return response, decision_details
-        
+
         except Exception as e:
             logger.error(f"Error generating portfolio allocation: {str(e)}")
-            
+
             # Fallback to a simple allocation
             allocation = self._create_fallback_portfolio_allocation(assets, portfolio_value, cash)
-            
+
             decision_details = {
                 "source": "fallback",
                 "confidence": 0.5,
                 "rationale": "Error in LLM response, using fallback allocation.",
                 "error": str(e)
             }
-            
+
             return allocation, decision_details
-    
+
     def get_asset_allocation(
         self,
         current_date: date,
@@ -208,11 +428,12 @@ class MemoryRLIntegration:
         market_analysis: Dict[str, Any],
         current_price: float,
         volatility: float,
-        hedging_strategies: List[str]
+        hedging_strategies: List[str],
+        controller_mode: ControllerMode = "full_llm",
     ) -> Tuple[AssetSplit, Dict[str, Any]]:
         """
         Get asset allocation using memory-based RL.
-        
+
         Args:
             current_date: Current date.
             asset: Asset ticker.
@@ -220,7 +441,7 @@ class MemoryRLIntegration:
             market_analysis: Market analysis for this asset.
             current_price: Current price of the asset.
             volatility: Volatility of the asset.
-            
+
         Returns:
             Tuple of (asset split, decision details).
         """
@@ -238,24 +459,39 @@ class MemoryRLIntegration:
             "outlook_score": market_analysis.get("outlook", 0.0),
             "short_term_outlook": market_analysis.get("short_term_outlook", "stable")
         }
-        
+
         market_regime = market_analysis.get("regime", "neutral")
-        
-        experiences, patterns = self.hierarchical_memory.get_asset_experiences(
+
+        experiences, patterns = self._get_asset_memory_context(
             asset=asset,
             current_state=current_state,
             market_regime=market_regime,
             num_experiences=5,
-            include_temporal_patterns=True
+            controller_mode=controller_mode,
         )
-        
+
         # Create additional context with temporal patterns
         additional_context = ""
         if patterns:
             additional_context += "Temporal Patterns:\n"
             for i, pattern in enumerate(patterns):
                 additional_context += f"Pattern {i+1}:\n{pattern.to_text()}\n"
-        
+
+        if controller_mode == "retrieval_only":
+            asset_split = self._build_retrieval_only_asset_split(
+                asset=asset,
+                allocation_amount=allocation_amount,
+                experiences=experiences,
+                controller_mode=controller_mode,
+            )
+            return asset_split, {
+                "source": controller_mode,
+                "confidence": 0.8 if experiences else 0.5,
+                "rationale": asset_split.rationale,
+                "experiences_used": [exp.id for exp in experiences],
+                "patterns_used": [pattern.id for pattern in patterns],
+            }
+
         # Create prompt
         prompt = self.prompt_templates.create_asset_prompt(
             current_date=current_date,
@@ -268,7 +504,7 @@ class MemoryRLIntegration:
             experiences=experiences,
             additional_context=additional_context
         )
-        
+
         # Generate allocation using LLM
         try:
             asset_split = self.llm_client.generate_text(prompt, AssetSplit)
@@ -280,24 +516,24 @@ class MemoryRLIntegration:
                 "experiences_used": [exp.id for exp in experiences],
                 "patterns_used": [pattern.id for pattern in patterns]
             }
-            
+
             return asset_split, decision_details
-        
+
         except Exception as e:
             logger.error(f"Error generating asset allocation: {str(e)}")
-            
+
             # Fallback to a simple allocation
             asset_split = self._create_fallback_asset_split(asset, allocation_amount)
-            
+
             decision_details = {
                 "source": "fallback",
                 "confidence": 0.5,
                 "rationale": "Error in LLM response, using fallback allocation.",
                 "error": str(e)
             }
-            
+
             return asset_split, decision_details
-    
+
     def get_hedging_strategy(
         self,
         current_date: date,
@@ -306,11 +542,12 @@ class MemoryRLIntegration:
         stock_position: Dict[str, Any],
         available_options: List[OptionData],
         available_capital: float,
-        market_analysis: Dict[str, Any]
+        market_analysis: Dict[str, Any],
+        controller_mode: ControllerMode = "full_llm",
     ) -> Tuple[HedgingStrategy, Dict[str, Any]]:
         """
         Get hedging strategy using memory-based RL.
-        
+
         Args:
             current_date: Current date.
             asset: Asset ticker.
@@ -319,7 +556,7 @@ class MemoryRLIntegration:
             available_options: Available options.
             available_capital: Available capital for options.
             market_analysis: Market analysis for this asset.
-            
+
         Returns:
             Tuple of (hedging strategy, decision details).
         """
@@ -336,25 +573,34 @@ class MemoryRLIntegration:
             "outlook_score": market_analysis.get("outlook", 0.0),
             "short_term_outlook": market_analysis.get("short_term_outlook", "stable")
         }
-        
+
         market_regime = market_analysis.get("regime", "neutral")
-        
-        experiences, patterns = self.hierarchical_memory.get_hedging_experiences(
+
+        experiences, patterns = self._get_hedging_memory_context(
             asset=asset,
             strategy_type=strategy_type,
             current_state=current_state,
             market_regime=market_regime,
             num_experiences=5,
-            include_temporal_patterns=True
+            controller_mode=controller_mode,
         )
-        
+
         # Create additional context with temporal patterns
         additional_context = ""
         if patterns:
             additional_context += "Temporal Patterns:\n"
             for i, pattern in enumerate(patterns):
                 additional_context += f"Pattern {i+1}:\n{pattern.to_text()}\n"
-        
+
+        if controller_mode == "retrieval_only":
+            return None, {
+                "source": controller_mode,
+                "confidence": 0.0,
+                "rationale": f"{controller_mode} does not use LLM hedging synthesis.",
+                "experiences_used": [exp.id for exp in experiences],
+                "patterns_used": [pattern.id for pattern in patterns],
+            }
+
         # Create prompt
         prompt = self.prompt_templates.create_hedging_prompt(
             current_date=current_date,
@@ -367,14 +613,14 @@ class MemoryRLIntegration:
             experiences=experiences,
             additional_context=additional_context
         )
-        
+
         # Generate strategy using LLM
         try:
             response = self.llm_client.generate_text(prompt, HedgingStrategyResponse)
-            
+
             # Convert to HedgingStrategy
             # hedging_strategy = self._convert_to_hedging_strategy(response.model_dump())
-            
+
             if isinstance(response, HedgingStrategyResponse):
                 hedging_strategy = convert_hedging_strategy_response(
                     response=response,
@@ -384,7 +630,11 @@ class MemoryRLIntegration:
                     current_date=current_date
                 )
             else:
-                return HedgingStrategy(asset=asset, strategy_type=strategy_type, rationale="Invalid response type", option_positions=[]), {}
+                return None, {
+                    "source": "fallback",
+                    "confidence": 0.0,
+                    "rationale": "Invalid hedging response type.",
+                }
             # Create decision details
             decision_details = {
                 "source": "memory_rl",
@@ -393,12 +643,12 @@ class MemoryRLIntegration:
                 "experiences_used": [exp.id for exp in experiences],
                 "patterns_used": [pattern.id for pattern in patterns]
             }
-            
+
             return hedging_strategy, decision_details
-        
+
         except Exception as e:
             logger.error(f"Error generating hedging strategy: {str(e)}")
-            
+
             # Fallback to a simple strategy
             # hedging_strategy = self._create_fallback_hedging_strategy(asset, strategy_type, available_options)
             hedging_strategy = None
@@ -408,9 +658,9 @@ class MemoryRLIntegration:
                 "rationale": "Error in LLM response, using fallback strategy.",
                 "error": str(e)
             }
-            
+
             return hedging_strategy, decision_details
-    
+
     def update_portfolio_results(
         self,
         date_val: date,
@@ -430,7 +680,7 @@ class MemoryRLIntegration:
     ) -> None:
         """
         Update portfolio results for memory-based RL learning.
-        
+
         Args:
             date_val: Date of the decision.
             assets: List of assets.
@@ -447,6 +697,8 @@ class MemoryRLIntegration:
             market_regime: Market regime.
             confidence: Confidence in the decision.
         """
+        if not self.config.allow_memory_updates:
+            return
         # Process outcome using reward system
         reward, experience_id, reflection = self.reward_system.process_portfolio_outcome(
             date_val=date_val,
@@ -465,16 +717,16 @@ class MemoryRLIntegration:
             confidence=confidence,
             generate_reflection=self.config.enable_reflection and (self.experience_counter % self.config.reflection_frequency == 0)
         )
-        
+
         # Increment experience counter
         self.experience_counter += 1
-        
+
         # Save memory to disk periodically
         if self.experience_counter % self.config.save_frequency == 0:
             self.hierarchical_memory.save_to_disk()
-        
+
         logger.info(f"Updated portfolio results: reward={reward:.4f}, experience_id={experience_id}")
-    
+
     def update_asset_results(
         self,
         date_val: date,
@@ -492,7 +744,7 @@ class MemoryRLIntegration:
     ) -> None:
         """
         Update asset results for memory-based RL learning.
-        
+
         Args:
             date_val: Date of the decision.
             asset: Asset ticker.
@@ -507,6 +759,8 @@ class MemoryRLIntegration:
             market_regime: Market regime.
             confidence: Confidence in the decision.
         """
+        if not self.config.allow_memory_updates:
+            return
         # Process outcome using reward system
         reward, experience_id, reflection = self.reward_system.process_asset_outcome(
             date_val=date_val,
@@ -523,16 +777,16 @@ class MemoryRLIntegration:
             confidence=confidence,
             generate_reflection=self.config.enable_reflection and (self.experience_counter % self.config.reflection_frequency == 0)
         )
-        
+
         # Increment experience counter
         self.experience_counter += 1
-        
+
         # Save memory to disk periodically
         if self.experience_counter % self.config.save_frequency == 0:
             self.hierarchical_memory.save_to_disk()
-        
+
         logger.info(f"Updated asset results for {asset}: reward={reward:.4f}, experience_id={experience_id}")
-    
+
     def update_hedging_results(
         self,
         date_val: date,
@@ -550,7 +804,7 @@ class MemoryRLIntegration:
     ) -> None:
         """
         Update hedging results for memory-based RL learning.
-        
+
         Args:
             date_val: Date of the decision.
             asset: Asset ticker.
@@ -565,6 +819,8 @@ class MemoryRLIntegration:
             market_regime: Market regime.
             confidence: Confidence in the decision.
         """
+        if not self.config.allow_memory_updates:
+            return
         # Process outcome using reward system
         reward, experience_id, reflection = self.reward_system.process_hedging_outcome(
             date_val=date_val,
@@ -581,65 +837,65 @@ class MemoryRLIntegration:
             confidence=confidence,
             generate_reflection=self.config.enable_reflection and (self.experience_counter % self.config.reflection_frequency == 0)
         )
-        
+
         # Increment experience counter
         self.experience_counter += 1
-        
+
         # Save memory to disk periodically
         if self.experience_counter % self.config.save_frequency == 0:
             self.hierarchical_memory.save_to_disk()
-        
+
         logger.info(f"Updated hedging results for {asset} {strategy_type}: reward={reward:.4f}, experience_id={experience_id}")
-    
+
     def generate_pattern_descriptions(self) -> None:
         """Generate descriptions for temporal patterns."""
         self.hierarchical_memory.generate_pattern_descriptions()
-    
+
     def generate_cross_level_descriptions(self) -> None:
         """Generate descriptions for cross-level experiences."""
         self.hierarchical_memory.generate_cross_level_descriptions()
-    
+
     def save_memory(self) -> bool:
         """
         Save memory to disk.
-        
+
         Returns:
             True if successful, False otherwise.
         """
         return self.hierarchical_memory.save_to_disk()
-    
+
     def load_memory(self) -> bool:
         """
         Load memory from disk.
-        
+
         Returns:
             True if successful, False otherwise.
         """
         return self.hierarchical_memory.load_from_disk()
-    
+
     def get_memory_stats(self) -> Dict[str, Any]:
         """
         Get statistics about the memory.
-        
+
         Returns:
             Dictionary of memory statistics.
         """
         return self.hierarchical_memory.get_memory_stats()
-    
+
     def _extract_json(self, text: str) -> Dict[str, Any]:
         """
         Extract JSON from text.
-        
+
         Args:
             text: Text containing JSON.
-            
+
         Returns:
             Extracted JSON as dictionary.
         """
         # Find JSON between triple backticks
         import re
         json_match = re.search(r'```(?:json)?\s*([\s\S]*?)\s*```', text)
-        
+
         if json_match:
             json_str = json_match.group(1)
         else:
@@ -649,22 +905,22 @@ class MemoryRLIntegration:
                 json_str = json_match.group(1)
             else:
                 raise ValueError("No JSON found in response")
-        
+
         try:
             return json.loads(json_str)
         except json.JSONDecodeError as e:
             logger.error(f"Error decoding JSON: {str(e)}")
             logger.error(f"JSON string: {json_str}")
             raise ValueError(f"Invalid JSON in response: {str(e)}")
-    
+
     def _convert_to_portfolio_allocation(self, allocation_dict: Dict[str, Any], assets: List[str]) -> PortfolioAllocation:
         """
         Convert allocation dictionary to PortfolioAllocation.
-        
+
         Args:
             allocation_dict: Allocation dictionary from LLM.
             assets: List of assets.
-            
+
         Returns:
             PortfolioAllocation object.
         """
@@ -676,7 +932,7 @@ class MemoryRLIntegration:
                 "amount": alloc.get("amount", 0.0),
                 "percentage": alloc.get("percentage", 0.0)
             })
-        
+
         # Create PortfolioAllocation
         return PortfolioAllocation(
             total_capital=allocation_dict.get("total_capital", 0.0),
@@ -684,14 +940,14 @@ class MemoryRLIntegration:
             cash_reserve=allocation_dict.get("cash_reserve", 0.0),
             rationale=allocation_dict.get("rationale", "")
         )
-    
+
     def _convert_to_asset_split(self, allocation_dict: Dict[str, Any]) -> AssetSplit:
         """
         Convert allocation dictionary to AssetSplit.
-        
+
         Args:
             allocation_dict: Allocation dictionary from LLM.
-            
+
         Returns:
             AssetSplit object.
         """
@@ -699,7 +955,7 @@ class MemoryRLIntegration:
         hedging_strategies = {}
         for strategy, percentage in allocation_dict.get("hedging_strategies", {}).items():
             hedging_strategies[strategy] = percentage
-        
+
         # Create AssetSplit
         return AssetSplit(
             asset=allocation_dict.get("asset", ""),
@@ -711,14 +967,14 @@ class MemoryRLIntegration:
             rationale=allocation_dict.get("rationale", ""),
             hedging_strategies=hedging_strategies
         )
-    
+
     def _convert_to_hedging_strategy(self, strategy_dict: Dict[str, Any]) -> HedgingStrategy:
         """
         Convert strategy dictionary to HedgingStrategy.
-        
+
         Args:
             strategy_dict: Strategy dictionary from LLM.
-            
+
         Returns:
             HedgingStrategy object.
         """
@@ -738,17 +994,19 @@ class MemoryRLIntegration:
             rationale=strategy_dict.get("rationale", ""),
             option_positions=option_positions,
             estimated_cost=strategy_dict.get("estimated_cost", 0.0),
+            estimated_protection=strategy_dict.get("estimated_protection", 0.0),
+            confidence=strategy_dict.get("confidence", 0.0),
         )
-    
+
     def _create_fallback_portfolio_allocation(self, assets: List[str], portfolio_value: float, cash: float) -> PortfolioAllocation:
         """
         Create a fallback portfolio allocation.
-        
+
         Args:
             assets: List of assets.
             portfolio_value: Current portfolio value.
             cash: Available cash.
-            
+
         Returns:
             PortfolioAllocation object.
         """
@@ -761,55 +1019,59 @@ class MemoryRLIntegration:
                 cash_reserve=portfolio_value,
                 rationale="Fallback allocation: no assets provided."
             )
-        
-        # Allocate 80% to assets, 20% to cash
-        asset_allocation = 0.8 * portfolio_value
-        cash_reserve = 0.2 * portfolio_value
-        
+
+        # Keep only a small cash reserve in fallback mode.
+        cash_reserve = DEFAULT_CASH_RESERVE_RATIO * portfolio_value
+        asset_allocation = portfolio_value - cash_reserve
+
         # Equal allocation to each asset
         per_asset = asset_allocation / num_assets
-        per_asset_percentage = 0.8 / num_assets
-        
+        per_asset_percentage = (1.0 - DEFAULT_CASH_RESERVE_RATIO) / num_assets
+
         allocations = []
         for asset in assets:
             allocations.append({
                 "asset": asset,
                 "amount": per_asset,
-                "percentage": per_asset_percentage
+                "percentage": per_asset_percentage,
+                "action": "buy",
             })
-        
+
         return PortfolioAllocation(
             total_capital=portfolio_value,
             allocations=allocations,
             cash_reserve=cash_reserve,
-            rationale="Fallback allocation: equal allocation to all assets with 20% cash reserve."
+            rationale=(
+                "Fallback allocation: equal allocation to all assets with "
+                f"{DEFAULT_CASH_RESERVE_RATIO:.0%} cash reserve."
+            )
         )
-    
+
     def _create_fallback_asset_split(self, asset: str, allocation_amount: float) -> AssetSplit:
         """
         Create a fallback asset split.
-        
+
         Args:
             asset: Asset ticker.
             allocation_amount: Amount allocated to this asset.
-            
+
         Returns:
             AssetSplit object.
         """
         # 70% stock, 30% options
         stock_percentage = 0.7
         options_percentage = 0.3
-        
+
         stock_amount = stock_percentage * allocation_amount
         options_amount = options_percentage * allocation_amount
-        
+
         # Equal allocation to all hedging strategies
         hedging_strategies = {
             "collar": 0.33,
             "straddle": 0.33,
             "delta_neutral": 0.34
         }
-        
+
         return AssetSplit(
             asset=asset,
             total_allocation=allocation_amount,
@@ -820,36 +1082,36 @@ class MemoryRLIntegration:
             rationale="Fallback allocation: 70% stock, 30% options with equal allocation to hedging strategies.",
             hedging_strategies=hedging_strategies
         )
-    
+
     def _create_fallback_hedging_strategy(self, asset: str, strategy_type: str, available_options: List[Dict[str, Any]]) -> HedgingStrategy:
         """
         Create a fallback hedging strategy.
-        
+
         Args:
             asset: Asset ticker.
             strategy_type: Type of hedging strategy.
             available_options: Available options.
-            
+
         Returns:
             HedgingStrategy object.
         """
         # Find suitable options based on strategy type
         option_positions = []
-        
+
         if strategy_type == "collar" and len(available_options) >= 2:
             # Find a put and a call
             put_options = [opt for opt in available_options if opt.get("option_type", 1) == 0]
             call_options = [opt for opt in available_options if opt.get("option_type", 1) == 1]
-            
+
             if put_options and call_options:
                 # Sort puts by strike (descending) and calls by strike (ascending)
                 put_options.sort(key=lambda x: x.get("strike", 0), reverse=True)
                 call_options.sort(key=lambda x: x.get("strike", 0))
-                
+
                 # Select first put and first call
                 put = put_options[0]
                 call = call_options[0]
-                
+
                 option_positions = [
                     {
                         "option_type": "put",
@@ -872,20 +1134,20 @@ class MemoryRLIntegration:
                         "rationale": "Premium collection"
                     }
                 ]
-        
+
         elif strategy_type == "straddle" and len(available_options) >= 2:
             # Find a put and a call with similar strikes
             put_options = [opt for opt in available_options if opt.get("option_type", 1) == 0]
             call_options = [opt for opt in available_options if opt.get("option_type", 1) == 1]
-            
+
             if put_options and call_options:
                 # Find closest to ATM
                 put_options.sort(key=lambda x: abs(x.get("moneyness", 1) - 1))
                 call_options.sort(key=lambda x: abs(x.get("moneyness", 1) - 1))
-                
+
                 put = put_options[0]
                 call = call_options[0]
-                
+
                 option_positions = [
                     {
                         "option_type": "put",
@@ -908,11 +1170,11 @@ class MemoryRLIntegration:
                         "rationale": "Profit from upside movement"
                     }
                 ]
-        
+
         elif strategy_type == "delta_neutral" and available_options:
             # Just pick the first option
             opt = available_options[0]
-            
+
             option_positions = [
                 {
                     "option_type": "put" if opt.get("option_type", 1) == 0 else "call",
@@ -925,7 +1187,7 @@ class MemoryRLIntegration:
                     "rationale": "Delta hedge"
                 }
             ]
-        
+
         return HedgingStrategy(
             asset=asset,
             strategy_type=strategy_type,

@@ -1,5 +1,5 @@
 """
-Market Analyzer for the portfolio risk-management simulation system.
+Market Analyzer for the hedge fund simulation system.
 Responsible for analyzing market conditions and determining regimes and sentiment.
 """
 
@@ -373,7 +373,7 @@ class MarketAnalyzer:
         3. Short-term outlook for this asset
         4. Your confidence level in this analysis (0.0 to 1.0)
         5. Consider analyst actions and their sentiment direction when evaluating outlook.
-        
+
         Format your response as a JSON array of objects, with each object containing:
         - asset: the ticker symbol
         - regime: the market regime

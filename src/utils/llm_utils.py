@@ -348,7 +348,7 @@ class OpenAIAPI:
                 total_tokens=total_tokens,
                 latency_seconds=latency_seconds,
                 model=request.model,
-                prompt=request.prompt,  
+                prompt=request.prompt,
             )
 
         except Exception as exc:  # pragma: no cover - defensive fallback
@@ -368,23 +368,23 @@ class OpenAIAPI:
 def get_llm_response_json_genai(prompt: str, response_model: Type[BaseModel], temperature: float = 0.5) -> Union[BaseModel, LLMResponse]:
     """
     Get a structured (JSON) response from the Gemini API and parse it into a Pydantic model.
-    
+
     Since Gemini does not provide beta parsing yet, we instruct the model via the prompt
     to output a valid JSON object. The response is then parsed into the provided model.
     """
     json_instruction = """
     IMPORTANT: Your response must be a valid JSON object that matches the following structure.
     Do not include any explanations, only return a valid JSON object.
-    
+
     JSON Structure:
     """
     full_prompt = f"{prompt}\n\n{json_instruction}{response_model.schema()}"
-    
+
     request = LLMRequest(
         prompt=full_prompt,
         temperature=temperature,
         max_tokens=10000,
-        model=getattr(config, "LLM_MODEL", "gemini-2.5-flash"),
+        model=getattr(config, "LLM_MODEL", "gemini-2.5-flash-lite"),
         response_format={"pydantic_model": response_model},
     )
     # Use the persistent GeminiAPI instance instead of creating a new one
@@ -503,31 +503,31 @@ def _coerce_market_regime(analysis: Union[MarketRegime, Dict[str, Any]]) -> Mark
 def build_market_analysis_prompt(ticker: str, historical_data: List[Dict], technical_indicators: Dict) -> str:
     """
     Build a prompt for market analysis of a specific asset.
-    
+
     Args:
         ticker: The stock ticker symbol.
         historical_data: List of historical price data points.
         technical_indicators: Dictionary of technical indicators.
-        
+
     Returns:
         Formatted prompt string.
     """
     prompt = f"""
     Analyze the market conditions for {ticker} based on the following data:
-    
+
     Recent Price Action:
     """
-    
+
     # Add last 5 days of price data
     for i, day in enumerate(historical_data[-5:]):
         prompt += f"- {day['date']}: Open ${day['open']:.2f}, Close ${day['close']:.2f}, High ${day['high']:.2f}, Low ${day['low']:.2f}, Volume {day['volume']}\n"
-    
+
     prompt += "\nTechnical Indicators:\n"
-    
+
     # Add technical indicators
     for indicator, value in technical_indicators.items():
         prompt += f"- {indicator}: {value}\n"
-    
+
     prompt += """
     Based on this information, determine:
     1. The current market regime (bullish, bearish, neutral, or volatile)
@@ -538,7 +538,7 @@ def build_market_analysis_prompt(ticker: str, historical_data: List[Dict], techn
 
     Provide supporting rationale for your analysis.
     """
-    
+
     return prompt
 
 
@@ -550,25 +550,25 @@ def build_portfolio_allocation_prompt(
 ) -> str:
     """
     Build a prompt for portfolio capital allocation across multiple assets.
-    
+
     Args:
         available_capital: Total capital available for allocation.
         assets: List of asset ticker symbols.
         market_analysis: Dictionary of market analysis results for each asset.
         current_positions: Optional dictionary of current positions.
-        
+
     Returns:
         Formatted prompt string.
     """
     prompt = f"""
-    You are a portfolio risk manager with ${available_capital:,.2f} to allocate across the following assets:
+    You are a hedge fund portfolio manager with ${available_capital:,.2f} to allocate across the following assets:
     {', '.join(assets)}
-    
+
     Here is the market analysis for each asset:
     """
 
     for ticker, analysis in market_analysis.items():
-        
+
         regime = _coerce_market_regime(analysis)
         prompt += f"""
         {ticker}:
@@ -578,26 +578,26 @@ def build_portfolio_allocation_prompt(
         - Narrative Outlook: {regime.short_term_outlook}
         - Confidence: {regime.confidence:.2f}
         """
-    
+
     if current_positions:
         prompt += "\nCurrent Portfolio Positions:\n"
         for ticker, position in current_positions.items():
             prompt += f"- {ticker}: ${position['market_value']:,.2f} ({position['shares']} shares at ${position['average_price']:.2f})\n"
-    
+
     prompt += f"""
     Determine how to allocate the ${available_capital:,.2f} across these assets. Consider:
     1. Market regime and sentiment for each asset
     2. Diversification principles
     3. Risk management
-    
+
     For each asset, specify:
     1. The dollar amount to allocate
     2. The percentage of the total portfolio
     3. Brief rationale for the allocation
-    
+
     You may also choose to keep some capital in cash reserves if appropriate (not much). Allocate some capital to all assets.
     """
-    
+
     return prompt
 
 
@@ -610,21 +610,21 @@ def build_hedging_strategy_prompt(
 ) -> str:
     """
     Build a prompt for determining hedging strategies for a specific asset.
-    
+
     Args:
         ticker: The stock ticker symbol.
         stock_position: Dictionary with details of the stock position.
         available_options: List of available options contracts.
         market_analysis: Market analysis for the asset.
         strategy_type: Type of hedging strategy to focus on.
-        
+
     Returns:
         Formatted prompt string.
     """
     regime = _coerce_market_regime(market_analysis)
 
     prompt = f"""
-    You are a portfolio options strategist. Design a hedging strategy for the following position:
+    You are a hedge fund options strategist. Design a hedging strategy for the following position:
 
     Asset: {ticker}
     Current Position: {stock_position['shares']} shares at ${stock_position['average_price']:.2f} (Market Value: ${stock_position['market_value']:,.2f})
@@ -638,7 +638,7 @@ def build_hedging_strategy_prompt(
 
     Available Options:
     """
-    
+
     # Add available options data
     for option in available_options[:10]:  # Limit to 10 options to keep prompt size reasonable
         prompt += f"""
@@ -646,13 +646,13 @@ def build_hedging_strategy_prompt(
           Last: ${option['last']:.2f}, Bid: ${option['bid']:.2f}, Ask: ${option['ask']:.2f}
           IV: {option['implied_volatility']:.2f}, Delta: {option['delta']:.2f}
         """
-    
+
     if strategy_type == "collar":
         prompt += """
         Design a collar strategy by selecting:
         1. A protective put (typically 5-10% OTM)
         2. A covered call (typically 5-10% OTM)
-        
+
         The goal is to protect against downside while generating premium income.
         """
     elif strategy_type == "straddle":
@@ -660,7 +660,7 @@ def build_hedging_strategy_prompt(
         Design a straddle strategy by selecting:
         1. At-the-money call options
         2. At-the-money put options
-        
+
         The goal is to profit from significant price movement in either direction.
         """
     elif strategy_type == "delta-neutral":
@@ -678,10 +678,10 @@ def build_hedging_strategy_prompt(
         - Straddle/Strangle (for volatility)
         - Delta-neutral approaches
         - Simple protective puts
-        
+
         Choose the strategy that best aligns with the market outlook and provides appropriate risk management.
         """
-    
+
     prompt += """
     For your recommended strategy, provide:
     1. Specific option contracts to use (strike, expiration, type)
@@ -690,7 +690,7 @@ def build_hedging_strategy_prompt(
     4. Expected protection/payoff profile
     5. Rationale for this strategy
     """
-    
+
     return prompt
 
 
@@ -704,12 +704,12 @@ def build_combined_allocation_split_prompt(
 ) -> str:
     """Build a prompt for both capital allocation and stock/options split decisions."""
     prompt = f"""
-    You are a portfolio risk manager with ${available_capital:,.2f} to allocate across the following assets:
+    You are a hedge fund portfolio manager with ${available_capital:,.2f} to allocate across the following assets:
     {', '.join(assets)}
-    
+
     Here is the market analysis for each asset:
     """
-    
+
     for ticker, analysis in market_analysis.items():
         regime = _coerce_market_regime(analysis)
         prompt += f"""
@@ -720,21 +720,28 @@ def build_combined_allocation_split_prompt(
         - Short-term Outlook: {regime.short_term_outlook}
         - Confidence: {regime.confidence:.2f}
         """
-    
+
     if current_positions:
         prompt += "\nCurrent Portfolio Positions:\n"
         for ticker, position in current_positions.items():
             prompt += f"- {ticker}: ${position['market_value']:,.2f} ({position['shares']} shares at ${position['average_price']:.2f})\n"
-    
+    Short_selling_note = ""
+    if getattr(config, "ALLOW_SHORT_SELLING", False):
+        Short_selling_note = "\nNote: Short selling is enabled in the configuration."
+    else:
+        Short_selling_note = "\nNote: Short selling is not allowed based on current configuration."
+    allowed_stock_actions = (
+        '"buy" or "sell"' if getattr(config, "ALLOW_SHORT_SELLING", False) else '"buy" only'
+    )
     prompt += f"""
     TASK 1: Determine how to allocate the ${available_capital:,.2f} across these assets, considering:
     - Market regime and sentiment for each asset
     - Diversification principles
     - Risk management
-    
+
     TASK 2: For EACH asset you've allocated capital to, determine:
     - What percentage should be allocated to stock vs. options?
-    
+
     For the options allocation on each asset, further split it among three hedging strategies based on current market conditions:
         - "collar": Use when protecting gains or limiting downside risk while capping upside.
         - "straddle": Use when expecting significant price movement in either direction (e.g., before earnings).
@@ -742,14 +749,19 @@ def build_combined_allocation_split_prompt(
     Ensure that the percentages for these three strategies sum to 1 (or 100%). Do not allocate too muhc into collar strategy.
 
     Format your response as a JSON object with:
-    - allocations: array of objects with asset, amount, and percentage
-    - asset_splits: object with asset tickers as keys and objects containing stock_percentage and options_percentage
-    - cash_reserve: amount to keep in cash
+    - allocations: array of objects with asset, amount, percentage, and action ({allowed_stock_actions})
+    - asset_splits: array of objects, one per allocated asset, each containing:
+      asset, total_allocation, stock_percentage, stocks_action ({allowed_stock_actions}),
+      options_percentage, stock_amount, options_amount, rationale, and hedging_strategies
+    - hedging_strategies must be an object with exactly these numeric fields:
+      collar, straddle, delta_neutral
+    - cash_reserve: amount to keep in cash; use 0-2% of available capital in normal conditions
     - rationale: overall strategy explanation
+    {Short_selling_note}
 
-    Important: Leave cash only in extreme market conditions. Try not to allocate more than 15% for options unless extereme market conditions. If you believe stocks is in a rally you may not allocate defensive options.
+    Important: Keep cash very small in normal conditions. Target 0-2% cash and do not exceed 2% cash unless there is an explicit emergency drawdown or extreme market stress. Try not to allocate more than 10% for options unless extereme market conditions. If you believe stocks is in a rally you may not allocate defensive options.
     """
-    
+
     return prompt
 
 # At the module level, define persistent API client instances

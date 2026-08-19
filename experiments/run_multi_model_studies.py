@@ -18,7 +18,7 @@ from uuid import uuid4
 import numpy as np
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-sys.path.append(str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT))
 
 import config
 from main import ensure_output_directory, save_simulation_results
@@ -32,8 +32,9 @@ random.seed(42)
 
 OUTPUT_ROOT = config.RESULTS_DIR
 EXPERIMENTS_ROOT = getattr(
-    config, "EXPERIMENTS_OUTPUT_DIR", os.path.join(OUTPUT_ROOT, "experiments")
+    config, "PAKDD_OUTPUT_DIR", os.path.join(OUTPUT_ROOT, "experiments")
 )
+PAKDD_ROOT = EXPERIMENTS_ROOT
 DEFAULT_GPT_MODEL = getattr(config, "DEFAULT_GPT_MODEL", "gpt-5")
 
 
@@ -103,6 +104,7 @@ def _run_simulation_worker(spec_dict: Dict[str, object]) -> Dict[str, object]:
         use_llm=config.USE_LLM,
         hedging_strategies=hedging_strategies,
         use_memory_rl=use_memory_rl,
+        equal_options_strategy_split=config.EQUAL_OPTIONS_STRATEGY_SPLIT,
         rule_based_strategy_split=False,
     )
 
@@ -226,7 +228,7 @@ async def run_pair_strategy_studies() -> None:
             hedging_strategies=list(combo),
             provider="openai",
             model=DEFAULT_GPT_MODEL,
-            output_dir=os.path.join(EXPERIMENTS_ROOT, "-".join(combo)),
+            output_dir=os.path.join(PAKDD_ROOT, "-".join(combo)),
         )
         for combo in combos
     ]
@@ -243,62 +245,85 @@ async def run_provider_comparison_study() -> None:
             provider="openai",
             model=DEFAULT_GPT_MODEL,
             use_memory_rl=False,
-            output_dir=os.path.join(EXPERIMENTS_ROOT, "gpt-no-memory"),
+            output_dir=os.path.join(PAKDD_ROOT, "gpt-no-memory"),
         ),
         StudyRunSpec(
             name="gemini-25-flash",
             hedging_strategies=config.HEDGING_STRATEGIES,
             provider="gemini",
-            model="gemini-2.5-flash",
-            output_dir=os.path.join(EXPERIMENTS_ROOT, "gemini-2-5-flash"),
+            model="gemini-2.5-flash-lite",
+            output_dir=os.path.join(PAKDD_ROOT, "gemini-2-5-flash"),
         ),
         StudyRunSpec(
             name="gemini-flash-lite",
             hedging_strategies=config.HEDGING_STRATEGIES,
             provider="gemini",
             model="gemini-2.5-flash-lite",
-            output_dir=os.path.join(EXPERIMENTS_ROOT, "gemini-2-5-flash-lite"),
+            output_dir=os.path.join(PAKDD_ROOT, "gemini-2-5-flash-lite"),
         ),
     ]
     await _run_group("Provider comparison (GPT vs Gemini)", specs)
 
 
-async def run_gpt_model_sweep() -> None:
-    """Run simulations across multiple GPT models with temperature 0.0."""
+async def run_coordinator_choice_study() -> None:
+    """Run the coordinator-choice and stochasticity variants reported in the paper."""
 
-    models = ["gpt-4.1-nano", "gpt-5-nano", "gpt-4o-mini"]
-    temps = ["0.7", "1.0"]
     specs = [
         StudyRunSpec(
-            name=model.replace(".", "-"),
+            name="gpt-5-nano",
             hedging_strategies=config.HEDGING_STRATEGIES,
             provider="openai",
-            model=model,
-            output_dir=os.path.join(EXPERIMENTS_ROOT, model.replace(".", "-")),
-        )
-        for model in models
-    ]
-    specs = [
+            model="gpt-5-nano",
+            output_dir=os.path.join(PAKDD_ROOT, "gpt-5-nano"),
+        ),
         StudyRunSpec(
-            name=f"default-{DEFAULT_GPT_MODEL.replace('.', '-')}-t{temp}",
+            name="gemini-2-5-flash-lite",
+            hedging_strategies=config.HEDGING_STRATEGIES,
+            provider="gemini",
+            model="gemini-2.5-flash-lite",
+            output_dir=os.path.join(PAKDD_ROOT, "gemini-2-5-flash-lite"),
+        ),
+        StudyRunSpec(
+            name="gpt-4o-mini",
+            hedging_strategies=config.HEDGING_STRATEGIES,
+            provider="openai",
+            model="gpt-4o-mini",
+            output_dir=os.path.join(PAKDD_ROOT, "gpt-4o-mini"),
+        ),
+        StudyRunSpec(
+            name="gpt-5-t0-7",
             hedging_strategies=config.HEDGING_STRATEGIES,
             provider="openai",
             model=DEFAULT_GPT_MODEL,
-            temperature=float(temp),
-            output_dir=os.path.join(EXPERIMENTS_ROOT, f"default-{DEFAULT_GPT_MODEL.replace('.', '-')}-t{temp}"),
-        )
-        for temp in temps
+            temperature=0.7,
+            output_dir=os.path.join(PAKDD_ROOT, "gpt-5-t0-7"),
+        ),
     ]
-    await _run_group("GPT model sweep (temperature 0.0)", specs)
+    await _run_group("Coordinator choice and stochasticity", specs)
 
+async def run_spy_5day_test() -> None:
+    """Run a simple 5-day test with SPY."""
+
+    specs = [
+        StudyRunSpec(
+            name="spy-5day-test",
+            hedging_strategies=["collar", "straddle", "delta-neutral"],
+            provider="gemini",
+            model=DEFAULT_GPT_MODEL,
+            use_memory_rl=False,
+            output_dir=os.path.join(EXPERIMENTS_ROOT, "spy-5day-test"),
+        )
+    ]
+    await _run_group("SPY 5-day test (2024)", specs)
 
 async def main() -> None:
     """Entrypoint for running selected study groups."""
 
-    parser = argparse.ArgumentParser(description="Run modular decision-system study groups.")
+    parser = argparse.ArgumentParser(description="Run MultiHedge study groups.")
     parser.add_argument(
         "--group",
         choices=[
+            "spy-5day",
             "individual",
             "all-strategies",
             "pairs",
@@ -306,27 +331,28 @@ async def main() -> None:
             "gpt-sweep",
             "paper-ablation",
         ],
-        default="pairs",
-        help="Study group to run. Use paper-ablation for the main ablation groups.",
+        default="spy-5day",
+        help="Study group to run. Use paper-ablation for the main strategy/model ablation groups.",
     )
     args = parser.parse_args()
 
-    if args.group == "individual":
-        await run_individual_strategy_studies()
-    elif args.group == "all-strategies":
-        await run_all_strategy_study()
-    elif args.group == "pairs":
-        await run_pair_strategy_studies()
-    elif args.group == "providers":
-        await run_provider_comparison_study()
-    elif args.group == "gpt-sweep":
-        await run_gpt_model_sweep()
-    elif args.group == "paper-ablation":
-        await run_individual_strategy_studies()
-        await run_all_strategy_study()
-        await run_pair_strategy_studies()
-        await run_provider_comparison_study()
-        await run_gpt_model_sweep()
+    runners = {
+        "spy-5day": [run_spy_5day_test],
+        "individual": [run_individual_strategy_studies],
+        "all-strategies": [run_all_strategy_study],
+        "pairs": [run_pair_strategy_studies],
+        "providers": [run_provider_comparison_study],
+        "gpt-sweep": [run_coordinator_choice_study],
+        "paper-ablation": [
+            run_individual_strategy_studies,
+            run_all_strategy_study,
+            run_pair_strategy_studies,
+            run_provider_comparison_study,
+            run_coordinator_choice_study,
+        ],
+    }
+    for runner in runners[args.group]:
+        await runner()
 
 
 if __name__ == "__main__":
